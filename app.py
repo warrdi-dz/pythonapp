@@ -168,8 +168,12 @@ def analyse():
 
         heat_color = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)
 
-        final = cv2.addWeighted(original, 0.85, heat_color, 0.35, 0)
+        heat_color = cv2.resize(
+        heat_color,
+        (original.shape[1], original.shape[0])
+         )
 
+         final = cv2.addWeighted(original,0.85, heat_color,0.35,0)
         # =========================
         # SCORE FINAL EXPERT
         # =========================
