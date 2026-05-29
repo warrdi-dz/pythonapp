@@ -2,6 +2,9 @@ from flask import Flask, request, jsonify
 import cv2
 import numpy as np
 import os
+import time
+import traceback
+from werkzeug.utils import secure_filename
 
 app = Flask(__name__)   # ✅ TOUJOURS ICI
 
@@ -201,7 +204,9 @@ def analyse():
 
     except Exception as e:
 
-        return jsonify({
-            "error": str(e),
-            "trace": traceback.format_exc()
-        }), 500
+    print(traceback.format_exc())
+
+    return jsonify({
+        "error": str(e),
+        "trace": traceback.format_exc()
+    }), 500
