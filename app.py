@@ -202,11 +202,11 @@ def analyse():
             "image_result": analysed_name
         })
 
-   except Exception as e:
+        except Exception as e:
 
-    print(traceback.format_exc())
+         print(traceback.format_exc())
 
-    return jsonify({
+         return jsonify({
         "error": str(e),
         "trace": traceback.format_exc()
-    }), 500
+          }), 500
