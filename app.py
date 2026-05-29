@@ -1,4 +1,5 @@
-from flask import Flask, request, jsonify, send_from_directoryimport cv2
+from flask import Flask, request, jsonify, send_from_directory
+import cv2
 import numpy as np
 import os
 import time
@@ -18,13 +19,9 @@ def uploads(filename):
 @app.route("/")
 def home():
     return jsonify({
-    "score": score,
-    "result": result,
-    "zones_detected": zones,
-    "symmetry_diff": float(symmetry_diff),
-    "image_result": analysed_name,
-    "image_url": request.host_url + "uploads/" + analysed_name
-      })
+        "status": "OK",
+        "message": "WARRDI SCAN API"
+    })
 
 @app.route("/analyse", methods=["POST"])
 def analyse():
@@ -209,12 +206,13 @@ def analyse():
 
         cv2.imwrite(analysed_path, final)
 
-        return jsonify({
-            "score": score,
-            "result": result,
-            "zones_detected": zones,
-            "symmetry_diff": float(symmetry_diff),
-            "image_result": analysed_name
+       return jsonify({
+       "score": score,
+       "result": result,
+       "zones_detected": zones,
+       "symmetry_diff": float(symmetry_diff),
+       "image_result": analysed_name,
+       "image_url": request.host_url + "uploads/" + analysed_name
         })
 
     except Exception as e:
