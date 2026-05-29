@@ -1,5 +1,4 @@
-from flask import Flask, request, jsonify
-import cv2
+from flask import Flask, request, jsonify, send_from_directoryimport cv2
 import numpy as np
 import os
 import time
@@ -10,10 +9,22 @@ app = Flask(__name__)   # ✅ TOUJOURS ICI
 
 UPLOAD_FOLDER = "uploads"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-
+@app.route("/uploads/<filename>")
+def uploads(filename):
+    return send_from_directory(
+        UPLOAD_FOLDER,
+        filename
+    )
 @app.route("/")
 def home():
-    return jsonify({"status": "OK"})
+    return jsonify({
+    "score": score,
+    "result": result,
+    "zones_detected": zones,
+    "symmetry_diff": float(symmetry_diff),
+    "image_result": analysed_name,
+    "image_url": request.host_url + "uploads/" + analysed_name
+      })
 
 @app.route("/analyse", methods=["POST"])
 def analyse():
