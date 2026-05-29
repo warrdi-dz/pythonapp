@@ -1,39 +1,3 @@
-from flask import Flask, request, jsonify, send_from_directory
-import cv2
-import numpy as np
-import os
-import time
-import traceback
-from werkzeug.utils import secure_filename
-
-app = Flask(__name__)
-
-UPLOAD_FOLDER = os.path.join(os.getcwd(), "uploads")
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-
-# =========================
-# HOME
-# =========================
-
-@app.route("/")
-def home():
-    return jsonify({
-        "status": "OK",
-        "message": "WARRDI STABLE AI SCAN"
-    })
-
-# =========================
-# SERVE IMAGES
-# =========================
-
-@app.route("/uploads/<filename>")
-def uploads(filename):
-    return send_from_directory(UPLOAD_FOLDER, filename)
-
-# =========================
-# ANALYSE IA STABLE
-# =========================
-
 @app.route("/analyse", methods=["POST"])
 def analyse():
 
@@ -56,128 +20,105 @@ def analyse():
             return jsonify({"error": "image not readable"}), 400
 
         # =========================
-        # REDUCTION MEMOIRE
+        # RESIZE SAFE
         # =========================
 
-        img = cv2.resize(img, (800, 450))
-
+        img = cv2.resize(img, (900, 500))
         original = img.copy()
 
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-
         blur = cv2.GaussianBlur(gray, (5, 5), 0)
 
         # =========================
-        # EDGE + TEXTURE MAP
+        # DETECTION CAR (CONTOUR MAIN)
         # =========================
 
-        lap = cv2.Laplacian(blur, cv2.CV_64F)
-        texture = np.uint8(np.absolute(lap))
-
-        # =========================
-        # REFLECTION ANALYSIS
-        # =========================
-
-        hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-        v = hsv[:, :, 2]
-
-        blur_v = cv2.GaussianBlur(v, (25, 25), 0)
-        diff_v = cv2.absdiff(v, blur_v)
-
-        # =========================
-        # COMBINE MAP
-        # =========================
-
-        combined = cv2.addWeighted(texture, 0.6, diff_v, 0.4, 0)
-
-        _, thresh = cv2.threshold(combined, 35, 255, cv2.THRESH_BINARY)
-
-        kernel = np.ones((5, 5), np.uint8)
-        thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
+        edges = cv2.Canny(blur, 60, 120)
 
         contours, _ = cv2.findContours(
-            thresh,
+            edges,
             cv2.RETR_EXTERNAL,
             cv2.CHAIN_APPROX_SIMPLE
         )
 
-        heatmap = np.zeros(gray.shape, dtype=np.uint8)
+        if len(contours) == 0:
+            return jsonify({"error": "no object detected"}), 400
 
-        zones = 0
-        score = 0
+        car_contour = max(contours, key=cv2.contourArea)
 
-       for cnt in contours:
+        x, y, w, h = cv2.boundingRect(car_contour)
 
-    area = cv2.contourArea(cnt)
+        car = gray[y:y+h, x:x+w]
 
-    if area < 500:
-        continue
+        if car.size == 0:
+            return jsonify({"error": "empty crop"}), 400
 
-    x, y, w, h = cv2.boundingRect(cnt)
-
-    roi = gray[y:y+h, x:x+w]
-
-    if roi.size == 0:
-        continue
-
-    brightness = np.mean(roi)
-    tex = cv2.Laplacian(roi, cv2.CV_64F).var()
-
-    # =========================
-    # SCORE LOCAL (IMPORTANT)
-    # =========================
-
-    local_score = 0
-
-    # texture anormale (trop lisse OU trop bruitée)
-    if tex < 80 or tex > 250:
-        local_score += 40
-
-    # luminosité bizarre
-    if brightness > 160 or brightness < 70:
-        local_score += 30
-
-    # zones trop uniformes = peinture possible
-    if 90 < brightness < 130 and tex < 120:
-        local_score += 30
-
-    # =========================
-    # DETECTION
-    # =========================
-
-    if local_score > 40:
-
-        zones += 1
-        score += local_score
-
-        cv2.rectangle(
-            original,
-            (x, y),
-            (x+w, y+h),
-            (0, 0, 255),
-            2
-        )
-
-        cv2.putText(
-            original,
-            "SUSPECT",
-            (x, y-10),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.6,
-            (0, 0, 255),
-            2
-        )
-
-        cv2.rectangle(
-            heatmap,
-            (x, y),
-            (x+w, y+h),
-            255,
-            -1
-        )
+        car = cv2.resize(car, (600, 300))
 
         # =========================
-        # HEATMAP FINAL
+        # PATCH ANALYSIS (IA LÉGÈRE)
+        # =========================
+
+        h_patches = 6
+        w_patches = 10
+
+        ph = car.shape[0] // h_patches
+        pw = car.shape[1] // w_patches
+
+        heatmap = np.zeros_like(car)
+
+        total_score = 0
+        zones = 0
+
+        for i in range(h_patches):
+            for j in range(w_patches):
+
+                patch = car[i*ph:(i+1)*ph, j*pw:(j+1)*pw]
+
+                if patch.size == 0:
+                    continue
+
+                brightness = np.mean(patch)
+                texture = cv2.Laplacian(patch, cv2.CV_64F).var()
+
+                score_local = 0
+
+                # =========================
+                # LOGIQUE IA SIMPLE MAIS EFFICACE
+                # =========================
+
+                if texture < 60:
+                    score_local += 40
+
+                if brightness > 170 or brightness < 60:
+                    score_local += 30
+
+                if 80 < brightness < 120 and texture < 100:
+                    score_local += 30
+
+                if score_local > 50:
+
+                    zones += 1
+                    total_score += score_local
+
+                    cv2.rectangle(
+                        original,
+                        (j*pw, i*ph),
+                        ((j+1)*pw, (i+1)*ph),
+                        (0, 0, 255),
+                        2
+                    )
+
+                    cv2.rectangle(
+                        heatmap,
+                        (j*pw, i*ph),
+                        ((j+1)*pw, (i+1)*ph),
+                        255,
+                        -1
+                    )
+
+        # =========================
+        # HEATMAP
         # =========================
 
         heat_color = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)
@@ -188,23 +129,22 @@ def analyse():
         # SCORE FINAL
         # =========================
 
-      score = int(min(score / 3, 100))
+        score = int(min(total_score / 2, 100))
 
         if score < 20:
-            result = "Aucune anomalie importante"
+            result = "Peinture normale"
         elif score < 50:
-            result = "Quelques zones suspectes"
+            result = "Doute léger sur peinture"
         elif score < 75:
-            result = "Peinture probablement retouchee"
+            result = "Peinture probablement refaite"
         else:
-            result = "Forte suspicion de peinture refaite"
+            result = "Forte suspicion de retouche peinture"
 
         # =========================
-        # SAVE IMAGE
+        # SAVE IMAGE RESULT
         # =========================
 
         analysed_name = "analysed_" + filename
-
         analysed_path = os.path.join(UPLOAD_FOLDER, analysed_name)
 
         cv2.imwrite(analysed_path, final)
@@ -222,10 +162,3 @@ def analyse():
             "error": str(e),
             "trace": traceback.format_exc()
         }), 500
-
-# =========================
-# START
-# =========================
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
