@@ -106,68 +106,75 @@ def analyse():
         zones = 0
         score = 0
 
-        for cnt in contours:
+       for cnt in contours:
 
-            area = cv2.contourArea(cnt)
+    area = cv2.contourArea(cnt)
 
-            if area < 800:
-                continue
+    if area < 500:
+        continue
 
-            x, y, w, h = cv2.boundingRect(cnt)
+    x, y, w, h = cv2.boundingRect(cnt)
 
-            roi = gray[y:y+h, x:x+w]
+    roi = gray[y:y+h, x:x+w]
 
-            if roi.size == 0:
-                continue
+    if roi.size == 0:
+        continue
 
-            brightness = np.mean(roi)
-            tex = cv2.Laplacian(roi, cv2.CV_64F).var()
+    brightness = np.mean(roi)
+    tex = cv2.Laplacian(roi, cv2.CV_64F).var()
 
-            # =========================
-            # LOGIQUE PLUS STABLE
-            # =========================
+    # =========================
+    # SCORE LOCAL (IMPORTANT)
+    # =========================
 
-            suspicious = False
+    local_score = 0
 
-            if tex < 120:
-                suspicious = True
+    # texture anormale (trop lisse OU trop bruitée)
+    if tex < 80 or tex > 250:
+        local_score += 40
 
-            if brightness > 150:
-                suspicious = True
+    # luminosité bizarre
+    if brightness > 160 or brightness < 70:
+        local_score += 30
 
-            if 60 < brightness < 90:
-                suspicious = True  # peinture possible (zone réfléchissante)
+    # zones trop uniformes = peinture possible
+    if 90 < brightness < 130 and tex < 120:
+        local_score += 30
 
-            if suspicious:
+    # =========================
+    # DETECTION
+    # =========================
 
-                zones += 1
-                score += int(min(area / 1000, 20))
+    if local_score > 40:
 
-                cv2.rectangle(
-                    original,
-                    (x, y),
-                    (x+w, y+h),
-                    (0, 0, 255),
-                    2
-                )
+        zones += 1
+        score += local_score
 
-                cv2.putText(
-                    original,
-                    "SUSPECT",
-                    (x, y-10),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.6,
-                    (0, 0, 255),
-                    2
-                )
+        cv2.rectangle(
+            original,
+            (x, y),
+            (x+w, y+h),
+            (0, 0, 255),
+            2
+        )
 
-                cv2.rectangle(
-                    heatmap,
-                    (x, y),
-                    (x+w, y+h),
-                    255,
-                    -1
-                )
+        cv2.putText(
+            original,
+            "SUSPECT",
+            (x, y-10),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            (0, 0, 255),
+            2
+        )
+
+        cv2.rectangle(
+            heatmap,
+            (x, y),
+            (x+w, y+h),
+            255,
+            -1
+        )
 
         # =========================
         # HEATMAP FINAL
@@ -181,7 +188,7 @@ def analyse():
         # SCORE FINAL
         # =========================
 
-        score = min(score, 100)
+      score = int(min(score / 3, 100))
 
         if score < 20:
             result = "Aucune anomalie importante"
