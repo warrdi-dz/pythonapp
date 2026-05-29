@@ -1,28 +1,29 @@
 from flask import Flask, request, jsonify, send_from_directory
-from ultralytics import YOLO
-from werkzeug.utils import secure_filename
-
 import cv2
 import numpy as np
 import os
 import time
-import threading
+import traceback
+from werkzeug.utils import secure_filename
 
 app = Flask(__name__)
 
 UPLOAD_FOLDER = os.path.join(os.getcwd(), "uploads")
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
-model = YOLO("yolov8n.pt")
-
 # =========================
-# MEMORY STORE (simple)
+# HOME
 # =========================
 
-jobs = {}
+@app.route("/")
+def home():
+    return jsonify({
+        "status": "OK",
+        "message": "WARRDI STABLE AI SCAN"
+    })
 
 # =========================
-# SERVE FILES
+# SERVE IMAGES
 # =========================
 
 @app.route("/uploads/<filename>")
@@ -30,81 +31,170 @@ def uploads(filename):
     return send_from_directory(UPLOAD_FOLDER, filename)
 
 # =========================
-# BACKGROUND PROCESS
+# ANALYSE IA STABLE
 # =========================
 
-def process_job(job_id, path, filename):
+@app.route("/analyse", methods=["POST"])
+def analyse():
 
     try:
 
+        if 'image' not in request.files:
+            return jsonify({"error": "no image"}), 400
+
+        file = request.files['image']
+
+        filename = str(int(time.time())) + "_" + secure_filename(file.filename)
+
+        path = os.path.join(UPLOAD_FOLDER, filename)
+
+        file.save(path)
+
         img = cv2.imread(path)
+
+        if img is None:
+            return jsonify({"error": "image not readable"}), 400
+
+        # =========================
+        # REDUCTION MEMOIRE
+        # =========================
+
         img = cv2.resize(img, (800, 450))
+
         original = img.copy()
 
-        results = model(img)
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
-        heatmap = np.zeros(img.shape[:2], dtype=np.uint8)
+        blur = cv2.GaussianBlur(gray, (5, 5), 0)
 
-        zones = 0
-        score_total = 0
+        # =========================
+        # EDGE + TEXTURE MAP
+        # =========================
 
-        for r in results:
+        lap = cv2.Laplacian(blur, cv2.CV_64F)
+        texture = np.uint8(np.absolute(lap))
 
-            for box in r.boxes:
+        # =========================
+        # REFLECTION ANALYSIS
+        # =========================
 
-                if int(box.cls[0]) != 2:
-                    continue
+        hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+        v = hsv[:, :, 2]
 
-                x1, y1, x2, y2 = map(int, box.xyxy[0])
+        blur_v = cv2.GaussianBlur(v, (25, 25), 0)
+        diff_v = cv2.absdiff(v, blur_v)
 
-                car = img[y1:y2, x1:x2]
+        # =========================
+        # COMBINE MAP
+        # =========================
 
-                if car.size == 0:
-                    continue
+        combined = cv2.addWeighted(texture, 0.6, diff_v, 0.4, 0)
 
-                gray = cv2.cvtColor(car, cv2.COLOR_BGR2GRAY)
-                blur = cv2.GaussianBlur(gray, (5,5), 0)
-                lap = cv2.Laplacian(blur, cv2.CV_64F)
+        _, thresh = cv2.threshold(combined, 35, 255, cv2.THRESH_BINARY)
 
-                texture = np.var(lap)
+        kernel = np.ones((5, 5), np.uint8)
+        thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
 
-                if texture < 300:
-
-                    zones += 1
-                    score_total += 15
-
-                    cv2.rectangle(
-                        original,
-                        (x1, y1),
-                        (x2, y2),
-                        (0,0,255),
-                        2
-                    )
-
-                    cv2.putText(
-                        original,
-                        "SUSPECT",
-                        (x1, y1-10),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.6,
-                        (0,0,255),
-                        2
-                    )
-
-                    cv2.rectangle(
-                        heatmap,
-                        (x1, y1),
-                        (x2, y2),
-                        255,
-                        -1
-                    )
-
-        heatmap_color = cv2.applyColorMap(
-            heatmap,
-            cv2.COLORMAP_JET
+        contours, _ = cv2.findContours(
+            thresh,
+            cv2.RETR_EXTERNAL,
+            cv2.CHAIN_APPROX_SIMPLE
         )
 
-        final = cv2.addWeighted(original, 0.85, heatmap_color, 0.35, 0)
+        heatmap = np.zeros(gray.shape, dtype=np.uint8)
+
+        zones = 0
+        score = 0
+
+        for cnt in contours:
+
+            area = cv2.contourArea(cnt)
+
+            if area < 800:
+                continue
+
+            x, y, w, h = cv2.boundingRect(cnt)
+
+            roi = gray[y:y+h, x:x+w]
+
+            if roi.size == 0:
+                continue
+
+            brightness = np.mean(roi)
+            tex = cv2.Laplacian(roi, cv2.CV_64F).var()
+
+            # =========================
+            # LOGIQUE PLUS STABLE
+            # =========================
+
+            suspicious = False
+
+            if tex < 120:
+                suspicious = True
+
+            if brightness > 150:
+                suspicious = True
+
+            if 60 < brightness < 90:
+                suspicious = True  # peinture possible (zone réfléchissante)
+
+            if suspicious:
+
+                zones += 1
+                score += int(min(area / 1000, 20))
+
+                cv2.rectangle(
+                    original,
+                    (x, y),
+                    (x+w, y+h),
+                    (0, 0, 255),
+                    2
+                )
+
+                cv2.putText(
+                    original,
+                    "SUSPECT",
+                    (x, y-10),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6,
+                    (0, 0, 255),
+                    2
+                )
+
+                cv2.rectangle(
+                    heatmap,
+                    (x, y),
+                    (x+w, y+h),
+                    255,
+                    -1
+                )
+
+        # =========================
+        # HEATMAP FINAL
+        # =========================
+
+        heat_color = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)
+
+        final = cv2.addWeighted(original, 0.85, heat_color, 0.35, 0)
+
+        # =========================
+        # SCORE FINAL
+        # =========================
+
+        score = min(score, 100)
+
+        if score < 20:
+            result = "Aucune anomalie importante"
+        elif score < 50:
+            result = "Quelques zones suspectes"
+        elif score < 75:
+            result = "Peinture probablement retouchee"
+        else:
+            result = "Forte suspicion de peinture refaite"
+
+        # =========================
+        # SAVE IMAGE
+        # =========================
 
         analysed_name = "analysed_" + filename
 
@@ -112,77 +202,19 @@ def process_job(job_id, path, filename):
 
         cv2.imwrite(analysed_path, final)
 
-        score = min(score_total, 100)
-
-        if score < 30:
-            result = "Aucune anomalie"
-        elif score < 60:
-            result = "Suspicion moyenne"
-        else:
-            result = "Peinture probablement refaite"
-
-        jobs[job_id] = {
-            "status": "done",
+        return jsonify({
             "score": score,
             "result": result,
-            "zones": zones,
-            "image": analysed_name
-        }
+            "zones_detected": zones,
+            "image_result": analysed_name
+        })
 
     except Exception as e:
 
-        jobs[job_id] = {
-            "status": "error",
-            "error": str(e)
-        }
-
-# =========================
-# CREATE JOB
-# =========================
-
-@app.route("/analyse", methods=["POST"])
-def analyse():
-
-    if 'image' not in request.files:
-        return jsonify({"error": "no image"}), 400
-
-    file = request.files['image']
-
-    filename = str(int(time.time())) + "_" + secure_filename(file.filename)
-
-    path = os.path.join(UPLOAD_FOLDER, filename)
-
-    file.save(path)
-
-    job_id = str(int(time.time()*1000))
-
-    jobs[job_id] = {
-        "status": "processing"
-    }
-
-    thread = threading.Thread(
-        target=process_job,
-        args=(job_id, path, filename)
-    )
-
-    thread.start()
-
-    return jsonify({
-        "job_id": job_id,
-        "status": "processing"
-    })
-
-# =========================
-# GET RESULT
-# =========================
-
-@app.route("/result/<job_id>")
-def result(job_id):
-
-    if job_id not in jobs:
-        return jsonify({"error": "job not found"}), 404
-
-    return jsonify(jobs[job_id])
+        return jsonify({
+            "error": str(e),
+            "trace": traceback.format_exc()
+        }), 500
 
 # =========================
 # START
