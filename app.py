@@ -194,7 +194,7 @@ def analyse():
 
         cv2.imwrite(analysed_path, final)
 
-        return jsonify({
+               return jsonify({
             "score": score,
             "result": result,
             "zones_detected": zones,
@@ -202,11 +202,15 @@ def analyse():
             "image_result": analysed_name
         })
 
-        except Exception as e:
+    except Exception as e:
 
-         print(traceback.format_exc())
+        print(traceback.format_exc())
 
-         return jsonify({
-        "error": str(e),
-        "trace": traceback.format_exc()
-          }), 500
+        return jsonify({
+            "error": str(e),
+            "trace": traceback.format_exc()
+        }), 500
+
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000)
