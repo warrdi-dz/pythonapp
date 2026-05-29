@@ -1,24 +1,52 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_from_directory
+from ultralytics import YOLO
+from werkzeug.utils import secure_filename
+
 import cv2
 import numpy as np
 import os
 import traceback
 import time
-from werkzeug.utils import secure_filename
 
 app = Flask(__name__)
 
 UPLOAD_FOLDER = os.path.join(os.getcwd(), "uploads")
+
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
+# =========================
+# YOLO MODEL
+# =========================
+
+model = YOLO("yolov8n.pt")
+
+# =========================
+# HOME
+# =========================
 
 @app.route("/")
 def home():
+
     return jsonify({
         "status": "OK",
-        "message": "WARRDI SCAN AUTO AI"
+        "message": "WARRDI AI EXPERT"
     })
 
+# =========================
+# SHOW IMAGE
+# =========================
+
+@app.route('/uploads/<filename>')
+def uploaded_file(filename):
+
+    return send_from_directory(
+        UPLOAD_FOLDER,
+        filename
+    )
+
+# =========================
+# ANALYSE
+# =========================
 
 @app.route("/analyse", methods=["POST"])
 def analyse():
@@ -26,178 +54,213 @@ def analyse():
     try:
 
         if 'image' not in request.files:
+
             return jsonify({
                 "error": "no image"
             }), 400
 
         file = request.files['image']
 
-        filename = str(int(time.time())) + "_" + secure_filename(file.filename)
+        filename = str(
+            int(time.time())
+        ) + "_" + secure_filename(file.filename)
 
-        path = os.path.join(UPLOAD_FOLDER, filename)
+        path = os.path.join(
+            UPLOAD_FOLDER,
+            filename
+        )
 
         file.save(path)
 
         img = cv2.imread(path)
 
         if img is None:
+
             return jsonify({
                 "error": "image not readable"
             }), 400
 
-        # =========================
-        # REDIMENSIONNEMENT
-        # =========================
-
-        img = cv2.resize(img, (1200, 700))
-
         original = img.copy()
 
         # =========================
-        # PREPARATION
+        # YOLO DETECTION
         # =========================
 
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        results = model(img)
 
-        blur = cv2.GaussianBlur(gray, (5, 5), 0)
+        car_found = False
 
-        # =========================
-        # ANALYSE TEXTURE
-        # =========================
+        total_score = 0
 
-        laplacian = cv2.Laplacian(blur, cv2.CV_64F)
+        zones = 0
 
-        texture_map = np.uint8(np.absolute(laplacian))
-
-        # =========================
-        # ANALYSE LUMINOSITE
-        # =========================
-
-        hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-
-        value_channel = hsv[:, :, 2]
-
-        # =========================
-        # ANALYSE REFLETS
-        # =========================
-
-        reflection = cv2.GaussianBlur(value_channel, (31, 31), 0)
-
-        diff_reflection = cv2.absdiff(value_channel, reflection)
-
-        # =========================
-        # SCORE MAP
-        # =========================
-
-        combined = cv2.addWeighted(
-            texture_map,
-            0.6,
-            diff_reflection,
-            0.4,
-            0
+        heatmap = np.zeros(
+            img.shape[:2],
+            dtype=np.uint8
         )
 
-        # =========================
-        # THRESHOLD
-        # =========================
+        for r in results:
 
-        _, thresh = cv2.threshold(
-            combined,
-            40,
-            255,
-            cv2.THRESH_BINARY
-        )
+            boxes = r.boxes
 
-        kernel = np.ones((5, 5), np.uint8)
+            for box in boxes:
 
-        thresh = cv2.morphologyEx(
-            thresh,
-            cv2.MORPH_CLOSE,
-            kernel
-        )
+                cls = int(box.cls[0])
 
-        # =========================
-        # CONTOURS
-        # =========================
+                # COCO class 2 = car
+                if cls == 2:
 
-        contours, _ = cv2.findContours(
-            thresh,
-            cv2.RETR_EXTERNAL,
-            cv2.CHAIN_APPROX_SIMPLE
-        )
+                    car_found = True
 
-        suspect_count = 0
-
-        total_area = 0
-
-        heatmap = np.zeros_like(gray)
-
-        for cnt in contours:
-
-            area = cv2.contourArea(cnt)
-
-            if area > 300:
-
-                x, y, w, h = cv2.boundingRect(cnt)
-
-                roi_gray = gray[y:y+h, x:x+w]
-
-                brightness = np.mean(roi_gray)
-
-                texture = cv2.Laplacian(
-                    roi_gray,
-                    cv2.CV_64F
-                ).var()
-
-                # =========================
-                # DETECTION SUSPECTE
-                # =========================
-
-                suspicious = False
-
-                if texture < 180:
-                    suspicious = True
-
-                if brightness > 170:
-                    suspicious = True
-
-                if suspicious:
-
-                    suspect_count += 1
-
-                    total_area += area
-
-                    # Rectangle rouge
-                    cv2.rectangle(
-                        original,
-                        (x, y),
-                        (x+w, y+h),
-                        (0, 0, 255),
-                        3
+                    x1, y1, x2, y2 = map(
+                        int,
+                        box.xyxy[0]
                     )
 
-                    # Texte
-                    cv2.putText(
-                        original,
-                        "ZONE SUSPECTE",
-                        (x, y-10),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.7,
-                        (0, 0, 255),
-                        2
+                    car = img[y1:y2, x1:x2]
+
+                    if car.size == 0:
+                        continue
+
+                    gray = cv2.cvtColor(
+                        car,
+                        cv2.COLOR_BGR2GRAY
                     )
 
-                    # Heatmap
-                    cv2.drawContours(
-                        heatmap,
-                        [cnt],
-                        -1,
+                    blur = cv2.GaussianBlur(
+                        gray,
+                        (5,5),
+                        0
+                    )
+
+                    laplacian = cv2.Laplacian(
+                        blur,
+                        cv2.CV_64F
+                    )
+
+                    texture_map = np.uint8(
+                        np.absolute(laplacian)
+                    )
+
+                    _, thresh = cv2.threshold(
+                        texture_map,
+                        35,
                         255,
-                        -1
+                        cv2.THRESH_BINARY
                     )
 
+                    contours, _ = cv2.findContours(
+                        thresh,
+                        cv2.RETR_EXTERNAL,
+                        cv2.CHAIN_APPROX_SIMPLE
+                    )
+
+                    for cnt in contours:
+
+                        area = cv2.contourArea(cnt)
+
+                        if area > 200:
+
+                            xx, yy, ww, hh = cv2.boundingRect(cnt)
+
+                            roi = gray[
+                                yy:yy+hh,
+                                xx:xx+ww
+                            ]
+
+                            if roi.size == 0:
+                                continue
+
+                            brightness = np.mean(roi)
+
+                            texture = cv2.Laplacian(
+                                roi,
+                                cv2.CV_64F
+                            ).var()
+
+                            suspicious = False
+
+                            if texture < 350:
+                                suspicious = True
+
+                            if brightness > 140:
+                                suspicious = True
+
+                            if suspicious:
+
+                                zones += 1
+
+                                zone_score = min(
+                                    int(area / 200),
+                                    25
+                                )
+
+                                total_score += zone_score
+
+                                # GLOBAL COORDS
+                                gx1 = x1 + xx
+                                gy1 = y1 + yy
+                                gx2 = gx1 + ww
+                                gy2 = gy1 + hh
+
+                                # RED RECTANGLE
+                                cv2.rectangle(
+                                    original,
+                                    (gx1, gy1),
+                                    (gx2, gy2),
+                                    (0,0,255),
+                                    3
+                                )
+
+                                cv2.putText(
+                                    original,
+                                    "Paint Suspect",
+                                    (gx1, gy1 - 10),
+                                    cv2.FONT_HERSHEY_SIMPLEX,
+                                    0.7,
+                                    (0,0,255),
+                                    2
+                                )
+
+                                # HEATMAP
+                                cv2.rectangle(
+                                    heatmap,
+                                    (gx1, gy1),
+                                    (gx2, gy2),
+                                    255,
+                                    -1
+                                )
+
+        if not car_found:
+
+            return jsonify({
+                "error": "no car detected"
+            }), 400
+
         # =========================
-        # HEATMAP ROUGE
+        # FINAL SCORE
+        # =========================
+
+        score = min(total_score, 100)
+
+        if score < 20:
+
+            result = "Aucune anomalie importante"
+
+        elif score < 50:
+
+            result = "Quelques anomalies detectees"
+
+        elif score < 75:
+
+            result = "Peinture probablement refaite"
+
+        else:
+
+            result = "Forte suspicion de peinture refaite"
+
+        # =========================
+        # HEATMAP
         # =========================
 
         heatmap_color = cv2.applyColorMap(
@@ -207,33 +270,14 @@ def analyse():
 
         final = cv2.addWeighted(
             original,
-            0.8,
+            0.85,
             heatmap_color,
-            0.4,
+            0.35,
             0
         )
 
         # =========================
-        # SCORE GLOBAL
-        # =========================
-
-        image_area = img.shape[0] * img.shape[1]
-
-        ratio = total_area / image_area
-
-        score = int(min(ratio * 1000, 100))
-
-        if score < 20:
-            result = "Aucune anomalie importante"
-        elif score < 50:
-            result = "Quelques incoherences detectees"
-        elif score < 75:
-            result = "Peinture probablement refaite"
-        else:
-            result = "Forte suspicion de peinture refaite"
-
-        # =========================
-        # SAUVEGARDE IMAGE
+        # SAVE IMAGE
         # =========================
 
         analysed_name = "analysed_" + filename
@@ -243,36 +287,40 @@ def analyse():
             analysed_name
         )
 
-        cv2.imwrite(analysed_path, final)
+        cv2.imwrite(
+            analysed_path,
+            final
+        )
 
         return jsonify({
+
             "score": score,
+
             "result": result,
-            "zones_detected": suspect_count,
+
+            "zones_detected": zones,
+
             "image_result": analysed_name
+
         })
 
     except Exception as e:
 
         return jsonify({
+
             "error": str(e),
+
             "trace": traceback.format_exc()
+
         }), 500
 
-from flask import send_from_directory
+# =========================
+# START
+# =========================
 
-@app.route('/uploads/<filename>')
-def uploaded_file(filename):
-
-    return send_from_directory(
-        UPLOAD_FOLDER,
-        filename
-    )
 if __name__ == "__main__":
 
     app.run(
         host="0.0.0.0",
         port=5000
     )
-
-
