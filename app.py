@@ -92,7 +92,8 @@ def analyse():
         t2 = cv2.Laplacian(right_zone, cv2.CV_64F).var()
 
         diff_texture = abs(t1 - t2)
-
+print("Brightness Diff:", diff_brightness)
+print("Texture Diff:", diff_texture)
         score = 0
 
         if diff_brightness > 12:
@@ -106,10 +107,12 @@ def analyse():
         else:
             result = "Peinture normale"
 
-        return jsonify({
-            "score": int(score),
-            "result": result
-        })
+       return jsonify({
+    "score": int(score),
+    "result": result,
+    "brightness_diff": float(diff_brightness),
+    "texture_diff": float(diff_texture)
+})
 
     except Exception as e:
 
