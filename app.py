@@ -9,7 +9,6 @@ def analyse():
         file = request.files['image']
 
         filename = str(int(time.time())) + "_" + secure_filename(file.filename)
-
         path = os.path.join(UPLOAD_FOLDER, filename)
 
         file.save(path)
@@ -20,7 +19,7 @@ def analyse():
             return jsonify({"error": "image not readable"}), 400
 
         # =========================
-        # RESIZE SAFE
+        # NORMALISATION IMAGE
         # =========================
 
         img = cv2.resize(img, (900, 500))
@@ -30,10 +29,10 @@ def analyse():
         blur = cv2.GaussianBlur(gray, (5, 5), 0)
 
         # =========================
-        # DETECTION CAR (CONTOUR MAIN)
+        # DETECTION VEHICULE GLOBAL
         # =========================
 
-        edges = cv2.Canny(blur, 60, 120)
+        edges = cv2.Canny(blur, 70, 140)
 
         contours, _ = cv2.findContours(
             edges,
@@ -42,7 +41,7 @@ def analyse():
         )
 
         if len(contours) == 0:
-            return jsonify({"error": "no object detected"}), 400
+            return jsonify({"error": "no vehicle detected"}), 400
 
         car_contour = max(contours, key=cv2.contourArea)
 
@@ -56,69 +55,98 @@ def analyse():
         car = cv2.resize(car, (600, 300))
 
         # =========================
-        # PATCH ANALYSIS (IA LÉGÈRE)
+        # DIVISION EXPERT (GAUCHE / DROITE / CENTRE)
         # =========================
 
-        h_patches = 6
-        w_patches = 10
-
-        ph = car.shape[0] // h_patches
-        pw = car.shape[1] // w_patches
+        left = car[:, :200]
+        center = car[:, 200:400]
+        right = car[:, 400:]
 
         heatmap = np.zeros_like(car)
 
-        total_score = 0
+        score = 0
         zones = 0
 
-        for i in range(h_patches):
-            for j in range(w_patches):
+        # =========================
+        # FONCTION ANALYSE ZONE
+        # =========================
 
-                patch = car[i*ph:(i+1)*ph, j*pw:(j+1)*pw]
+        def analyse_zone(zone, x_offset):
 
-                if patch.size == 0:
-                    continue
+            nonlocal score, zones
 
-                brightness = np.mean(patch)
-                texture = cv2.Laplacian(patch, cv2.CV_64F).var()
+            brightness = np.mean(zone)
+            texture = cv2.Laplacian(zone, cv2.CV_64F).var()
 
-                score_local = 0
+            local_score = 0
 
-                # =========================
-                # LOGIQUE IA SIMPLE MAIS EFFICACE
-                # =========================
+            # logique expert garage
+            if texture < 60:
+                local_score += 40
 
-                if texture < 60:
-                    score_local += 40
+            if texture > 250:
+                local_score += 25
 
-                if brightness > 170 or brightness < 60:
-                    score_local += 30
+            if brightness > 175 or brightness < 65:
+                local_score += 30
 
-                if 80 < brightness < 120 and texture < 100:
-                    score_local += 30
+            if 80 < brightness < 120 and texture < 90:
+                local_score += 35
 
-                if score_local > 50:
+            if local_score >= 50:
 
-                    zones += 1
-                    total_score += score_local
+                zones += 1
+                score += local_score
 
-                    cv2.rectangle(
-                        original,
-                        (j*pw, i*ph),
-                        ((j+1)*pw, (i+1)*ph),
-                        (0, 0, 255),
-                        2
-                    )
+                h, w = zone.shape
 
-                    cv2.rectangle(
-                        heatmap,
-                        (j*pw, i*ph),
-                        ((j+1)*pw, (i+1)*ph),
-                        255,
-                        -1
-                    )
+                cv2.rectangle(
+                    original,
+                    (x_offset, 0),
+                    (x_offset + w, h),
+                    (0, 0, 255),
+                    2
+                )
+
+                cv2.rectangle(
+                    heatmap,
+                    (x_offset, 0),
+                    (x_offset + w, h),
+                    255,
+                    -1
+                )
 
         # =========================
-        # HEATMAP
+        # ANALYSE DES 3 ZONES
+        # =========================
+
+        analyse_zone(left, 0)
+        analyse_zone(center, 200)
+        analyse_zone(right, 400)
+
+        # =========================
+        # SYMETRIE (TRÈS IMPORTANT EN EXPERTISE)
+        # =========================
+
+        left_mean = np.mean(left)
+        right_mean = np.mean(right)
+
+        symmetry_diff = abs(left_mean - right_mean)
+
+        if symmetry_diff > 25:
+            score += 20
+            cv2.putText(
+                original,
+                "ASYMMETRIE PEINTURE",
+                (20, 30),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                (0, 0, 255),
+                2
+            )
+
+        # =========================
+        # HEATMAP FINAL
         # =========================
 
         heat_color = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)
@@ -126,22 +154,22 @@ def analyse():
         final = cv2.addWeighted(original, 0.85, heat_color, 0.35, 0)
 
         # =========================
-        # SCORE FINAL
+        # SCORE FINAL EXPERT
         # =========================
 
-        score = int(min(total_score / 2, 100))
+        score = int(min(score, 100))
 
         if score < 20:
-            result = "Peinture normale"
-        elif score < 50:
-            result = "Doute léger sur peinture"
-        elif score < 75:
+            result = "Peinture d'origine (OK)"
+        elif score < 45:
+            result = "Légères retouches possibles"
+        elif score < 70:
             result = "Peinture probablement refaite"
         else:
-            result = "Forte suspicion de retouche peinture"
+            result = "Forte suspicion de carrosserie repeinte"
 
         # =========================
-        # SAVE IMAGE RESULT
+        # SAVE RESULT IMAGE
         # =========================
 
         analysed_name = "analysed_" + filename
@@ -153,6 +181,7 @@ def analyse():
             "score": score,
             "result": result,
             "zones_detected": zones,
+            "symmetry_diff": float(symmetry_diff),
             "image_result": analysed_name
         })
 
