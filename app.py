@@ -6,8 +6,9 @@ import traceback
 
 app = Flask(__name__)
 
-UPLOAD_FOLDER = "/tmp"
 
+UPLOAD_FOLDER = os.path.join(os.getcwd(), "uploads")
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 @app.route("/")
 def home():
     return jsonify({"status": "OK", "message": "SCAN AUTO API"})
