@@ -3,9 +3,8 @@ import cv2
 import numpy as np
 import os
 import traceback
-
+from werkzeug.utils import secure_filename
 app = Flask(__name__)
-
 
 UPLOAD_FOLDER = os.path.join(os.getcwd(), "uploads")
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
@@ -26,10 +25,13 @@ def analyse():
                 "debug_files": str(request.files)
             }), 400
 
-        file = request.files['image']
+     file = request.files['image']
 
-        path = os.path.join(UPLOAD_FOLDER, file.filename)
-        file.save(path)
+filename = secure_filename(file.filename)
+
+path = os.path.join(UPLOAD_FOLDER, filename)
+
+file.save(path)
 
         img = cv2.imread(path)
 
