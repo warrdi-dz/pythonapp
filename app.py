@@ -13,6 +13,7 @@ os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
 @app.route("/")
 def home():
+
     return jsonify({
         "status": "OK",
         "message": "SCAN AUTO API"
@@ -24,105 +25,158 @@ def analyse():
 
     try:
 
-        print("FILES:", request.files)
-        print("FORM:", request.form)
-
         if 'image' not in request.files:
+
             return jsonify({
-                "error": "no image",
-                "debug_files": str(request.files)
+                "error": "no image"
             }), 400
 
         file = request.files['image']
 
         filename = secure_filename(file.filename)
 
-        path = os.path.join(UPLOAD_FOLDER, filename)
+        path = os.path.join(
+            UPLOAD_FOLDER,
+            filename
+        )
 
         file.save(path)
 
         img = cv2.imread(path)
 
         if img is None:
+
             return jsonify({
                 "error": "image not readable"
             }), 400
 
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        original = img.copy()
 
-        blur = cv2.GaussianBlur(gray, (5, 5), 0)
+        gray = cv2.cvtColor(
+            img,
+            cv2.COLOR_BGR2GRAY
+        )
 
-        edges = cv2.Canny(blur, 50, 150)
+        blur = cv2.GaussianBlur(
+            gray,
+            (5, 5),
+            0
+        )
 
-        contours_data = cv2.findContours(
-            edges,
+        laplacian = cv2.Laplacian(
+            blur,
+            cv2.CV_64F
+        )
+
+        texture_map = np.uint8(
+            np.absolute(laplacian)
+        )
+
+        _, thresh = cv2.threshold(
+            texture_map,
+            35,
+            255,
+            cv2.THRESH_BINARY
+        )
+
+        contours, _ = cv2.findContours(
+            thresh,
             cv2.RETR_EXTERNAL,
             cv2.CHAIN_APPROX_SIMPLE
         )
 
-        contours = contours_data[0] if len(contours_data) == 2 else contours_data[1]
+        suspect_count = 0
 
-        if len(contours) == 0:
-            return jsonify({
-                "error": "no object detected"
-            }), 400
+        for cnt in contours:
 
-        main_contour = max(contours, key=cv2.contourArea)
+            area = cv2.contourArea(cnt)
 
-        x, y, w, h = cv2.boundingRect(main_contour)
+            if area > 500:
 
-        car = gray[y:y+h, x:x+w]
+                x, y, w, h = cv2.boundingRect(cnt)
 
-        if car.size == 0:
-            return jsonify({
-                "error": "empty crop"
-            }), 400
+                roi = gray[y:y+h, x:x+w]
 
-        car = cv2.resize(car, (600, 300))
+                brightness = np.mean(roi)
 
-        left_zone = car[:, :300]
-        right_zone = car[:, 300:]
+                texture = cv2.Laplacian(
+                    roi,
+                    cv2.CV_64F
+                ).var()
 
-        b1 = np.mean(left_zone)
-        b2 = np.mean(right_zone)
+                if texture < 40 or brightness > 170:
 
-        diff_brightness = abs(b1 - b2)
+                    suspect_count += 1
 
-        t1 = cv2.Laplacian(left_zone, cv2.CV_64F).var()
-        t2 = cv2.Laplacian(right_zone, cv2.CV_64F).var()
+                    cv2.rectangle(
+                        original,
+                        (x, y),
+                        (x + w, y + h),
+                        (0, 0, 255),
+                        3
+                    )
 
-        diff_texture = abs(t1 - t2)
+                    cv2.putText(
+                        original,
+                        "Paint Suspect",
+                        (x, y - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.7,
+                        (0, 0, 255),
+                        2
+                    )
 
-        print("Brightness Diff:", diff_brightness)
-        print("Texture Diff:", diff_texture)
+        score = min(
+            suspect_count * 20,
+            100
+        )
 
-        score = 0
+        if score > 50:
 
-        if diff_brightness > 12:
-            score += 50
+            result = "Peinture probablement refaite"
 
-        if diff_texture > 80:
-            score += 50
-
-        if score > 60:
-            result = "Peinture suspecte détectée"
         else:
-            result = "Peinture normale"
+
+            result = "Aucune anomalie importante"
+
+        analysed_name = (
+            "analysed_" + filename
+        )
+
+        analysed_path = os.path.join(
+            UPLOAD_FOLDER,
+            analysed_name
+        )
+
+        cv2.imwrite(
+            analysed_path,
+            original
+        )
 
         return jsonify({
-            "score": int(score),
+
+            "score": score,
+
             "result": result,
-            "brightness_diff": float(diff_brightness),
-            "texture_diff": float(diff_texture)
+
+            "image_result": analysed_name
+
         })
 
     except Exception as e:
 
         return jsonify({
+
             "error": str(e),
+
             "trace": traceback.format_exc()
+
         }), 500
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+
+    app.run(
+        host="0.0.0.0",
+        port=5000
+    )
