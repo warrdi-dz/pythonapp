@@ -1,3 +1,17 @@
+from flask import Flask, request, jsonify
+import cv2
+import numpy as np
+import os
+
+app = Flask(__name__)   # ✅ TOUJOURS ICI
+
+UPLOAD_FOLDER = "uploads"
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+
+@app.route("/")
+def home():
+    return jsonify({"status": "OK"})
+
 @app.route("/analyse", methods=["POST"])
 def analyse():
 
