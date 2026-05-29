@@ -202,7 +202,7 @@ def analyse():
             "image_result": analysed_name
         })
 
-    except Exception as e:
+   except Exception as e:
 
     print(traceback.format_exc())
 
