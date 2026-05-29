@@ -6,7 +6,16 @@ import os
 app = Flask(__name__)
 
 UPLOAD_FOLDER = "/tmp"
+@app.route("/analyse", methods=["POST"])
+def analyse():
+    print("FILES:", request.files)
+    print("FORM:", request.form)
 
+    if 'image' not in request.files:
+        return jsonify({
+            "error": "no image",
+            "files": str(request.files)
+        }), 400
 @app.route("/")
 def home():
     return jsonify({"status": "OK", "message": "SCAN AUTO API"})
