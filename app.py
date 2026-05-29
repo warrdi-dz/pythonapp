@@ -2,20 +2,12 @@ from flask import Flask, request, jsonify
 import cv2
 import numpy as np
 import os
+import traceback
 
 app = Flask(__name__)
 
 UPLOAD_FOLDER = "/tmp"
-@app.route("/analyse", methods=["POST"])
-def analyse():
-    print("FILES:", request.files)
-    print("FORM:", request.form)
 
-    if 'image' not in request.files:
-        return jsonify({
-            "error": "no image",
-            "files": str(request.files)
-        }), 400
 @app.route("/")
 def home():
     return jsonify({"status": "OK", "message": "SCAN AUTO API"})
@@ -23,65 +15,79 @@ def home():
 @app.route("/analyse", methods=["POST"])
 def analyse():
 
-    if 'image' not in request.files:
-        return jsonify({"error": "no image"}), 400
+    try:
+        print("FILES:", request.files)
+        print("FORM:", request.form)
 
-    file = request.files['image']
+        if 'image' not in request.files:
+            return jsonify({
+                "error": "no image",
+                "debug_files": str(request.files)
+            }), 400
 
-    path = os.path.join(UPLOAD_FOLDER, file.filename)
-    file.save(path)
+        file = request.files['image']
 
-    img = cv2.imread(path)
+        path = os.path.join(UPLOAD_FOLDER, file.filename)
+        file.save(path)
 
-    if img is None:
-        return jsonify({"error": "image not readable"}), 400
+        img = cv2.imread(path)
 
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    blur = cv2.GaussianBlur(gray, (5,5), 0)
-    edges = cv2.Canny(blur, 50, 150)
+        if img is None:
+            return jsonify({"error": "image not readable"}), 400
 
-    contours_data = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    contours = contours_data[0] if len(contours_data) == 2 else contours_data[1]
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        blur = cv2.GaussianBlur(gray, (5,5), 0)
+        edges = cv2.Canny(blur, 50, 150)
 
-    if len(contours) == 0:
-        return jsonify({"error": "no object detected"}), 400
+        contours_data = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        contours = contours_data[0] if len(contours_data) == 2 else contours_data[1]
 
-    main_contour = max(contours, key=cv2.contourArea)
+        if len(contours) == 0:
+            return jsonify({"error": "no object detected"}), 400
 
-    x, y, w, h = cv2.boundingRect(main_contour)
+        main_contour = max(contours, key=cv2.contourArea)
 
-    car = gray[y:y+h, x:x+w]
+        x, y, w, h = cv2.boundingRect(main_contour)
 
-    if car.size == 0:
-        return jsonify({"error": "empty crop"}), 400
+        car = gray[y:y+h, x:x+w]
 
-    car = cv2.resize(car, (600, 300))
+        if car.size == 0:
+            return jsonify({"error": "empty crop"}), 400
 
-    left_zone = car[:, :300]
-    right_zone = car[:, 300:]
+        car = cv2.resize(car, (600, 300))
 
-    b1 = np.mean(left_zone)
-    b2 = np.mean(right_zone)
+        left_zone = car[:, :300]
+        right_zone = car[:, 300:]
 
-    diff_brightness = abs(b1 - b2)
+        b1 = np.mean(left_zone)
+        b2 = np.mean(right_zone)
 
-    t1 = cv2.Laplacian(left_zone, cv2.CV_64F).var()
-    t2 = cv2.Laplacian(right_zone, cv2.CV_64F).var()
+        diff_brightness = abs(b1 - b2)
 
-    diff_texture = abs(t1 - t2)
+        t1 = cv2.Laplacian(left_zone, cv2.CV_64F).var()
+        t2 = cv2.Laplacian(right_zone, cv2.CV_64F).var()
 
-    score = 0
-    if diff_brightness > 12:
-        score += 50
-    if diff_texture > 80:
-        score += 50
+        diff_texture = abs(t1 - t2)
 
-    result = "Peinture suspecte détectée" if score > 60 else "Peinture normale"
+        score = 0
+        if diff_brightness > 12:
+            score += 50
+        if diff_texture > 80:
+            score += 50
 
-    return jsonify({
-        "score": int(score),
-        "result": result
-    })
+        result = "Peinture suspecte détectée" if score > 60 else "Peinture normale"
+
+        return jsonify({
+            "score": int(score),
+            "result": result
+        })
+
+    except Exception as e:
+        return jsonify({
+            "error": str(e),
+            "trace": traceback.format_exc()
+        }), 500
+
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
