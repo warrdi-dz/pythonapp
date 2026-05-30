@@ -215,7 +215,7 @@ def analyse():
        "image_url": request.host_url + "uploads/" + analysed_name
         })
 
-        except Exception as e:
+    except Exception as e:
 
         print(traceback.format_exc())
                        
