@@ -46,7 +46,7 @@ def analyse():
         # =========================
         results = model(img)
 
-        car_found = False
+        car_found = True
 
         for r in results:
             for box in r.boxes:
