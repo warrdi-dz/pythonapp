@@ -25,7 +25,7 @@ def home():
 
 @app.route("/analyse", methods=["POST"])
 def analyse():
-
+           
     try:
 
         if 'image' not in request.files:
@@ -206,7 +206,7 @@ def analyse():
 
         cv2.imwrite(analysed_path, final)
 
-       return jsonify({
+        return jsonify({
        "score": score,
        "result": result,
        "zones_detected": zones,
@@ -215,7 +215,7 @@ def analyse():
        "image_url": request.host_url + "uploads/" + analysed_name
         })
 
-    except Exception as e:
+        except Exception as e:
 
         print(traceback.format_exc())
                        
