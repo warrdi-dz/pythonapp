@@ -8,7 +8,7 @@ from werkzeug.utils import secure_filename
 from ultralytics import YOLO
 
 model = YOLO("yolov8n.pt")
-
+model = None
 app = Flask(__name__)
 
 UPLOAD_FOLDER = "uploads"
@@ -29,6 +29,14 @@ def home():
 def analyse():
 
     try:
+
+        global model
+
+        if model is None:
+            model = YOLO("yolov8n.pt")
+
+
+        
         if 'image' not in request.files:
             return jsonify({"error": "no image"}), 400
 
@@ -46,7 +54,7 @@ def analyse():
         # =========================
         results = model(img)
 
-        car_found = True
+        car_found = false
 
         for r in results:
             for box in r.boxes:
@@ -68,7 +76,8 @@ def analyse():
         # =========================
         # PREPROCESS
         # =========================
-        img = cv2.resize(img, (900, 500))
+        
+        img = cv2.resize(img, (640, 360))
         original = img.copy()
 
         hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
