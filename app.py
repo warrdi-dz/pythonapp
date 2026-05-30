@@ -46,12 +46,31 @@ def analyse():
         # =========================
         # NORMALISATION IMAGE
         # =========================
-
         img = cv2.resize(img, (900, 500))
         original = img.copy()
 
+        # SUPPRESSION DES REFLETS
+        hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+
+        mask_reflet = cv2.inRange(
+        hsv,
+        np.array([0, 0, 220]),
+        np.array([180, 60, 255])
+        )
+
+        img = cv2.inpaint(
+        img,
+        mask_reflet,
+        7,
+        cv2.INPAINT_TELEA
+        )
+
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         blur = cv2.GaussianBlur(gray, (5, 5), 0)
+
+    # Analyse couleur LAB
+        lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
+        
 
         # =========================
         # DETECTION VEHICULE GLOBAL
@@ -102,7 +121,7 @@ def analyse():
 
             brightness = np.mean(zone)
             texture = cv2.Laplacian(zone, cv2.CV_64F).var()
-
+            color_var = np.std(zone)
             local_score = 0
 
             # logique expert garage
@@ -117,7 +136,8 @@ def analyse():
 
             if 80 < brightness < 120 and texture < 90:
                 local_score += 35
-
+            if color_var > 12:
+                local_score += 30
             if local_score >= 50:
 
                 zones += 1
