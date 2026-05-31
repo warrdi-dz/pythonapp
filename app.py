@@ -12,6 +12,9 @@ app = Flask(__name__)
 UPLOAD_FOLDER = "uploads"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
+TARGET_W = 900
+TARGET_H = 500
+
 # =========================
 # YOLO API CALL
 # =========================
@@ -41,10 +44,7 @@ def uploads(filename):
 # =========================
 @app.route("/")
 def home():
-    return jsonify({
-        "status": "OK",
-        "message": "GARAGE PRO V4 API"
-    })
+    return jsonify({"status": "OK", "message": "GARAGE PRO V4 API"})
 
 
 # =========================
@@ -77,14 +77,29 @@ def analyse():
         path = os.path.join(UPLOAD_FOLDER, filename)
         file.save(path)
 
-        yolo_result = call_yolo(path)
-
-        img = cv2.imread(path)
-        if img is None:
+        # ===============================================
+        # LIRE L'IMAGE ORIGINALE
+        # ===============================================
+        img_orig = cv2.imread(path)
+        if img_orig is None:
             return jsonify({"error": "image unreadable"}), 400
 
-        img = cv2.resize(img, (900, 500))
-        img_h, img_w = img.shape[:2]
+        orig_h, orig_w = img_orig.shape[:2]
+
+        # ===============================================
+        # REDIMENSIONNER ET SAUVEGARDER
+        # → on envoie l'image DÉJÀ redimensionnée à YOLO
+        # comme ça les coordonnées matchent directement
+        # ===============================================
+        img = cv2.resize(img_orig, (TARGET_W, TARGET_H))
+
+        resized_path = os.path.join(UPLOAD_FOLDER, "resized_" + filename)
+        cv2.imwrite(resized_path, img)
+
+        # YOLO reçoit l'image redimensionnée
+        yolo_result = call_yolo(resized_path)
+
+        img_h, img_w = img.shape[:2]   # = TARGET_H, TARGET_W
 
         detections = yolo_result.get("detections", [])
         cars = [d for d in detections if d.get("class") == 2]
@@ -92,20 +107,19 @@ def analyse():
             return jsonify({"error": "Car not detected"}), 400
 
         # ===============================================
-        # BOUNDING BOX : ON PREND TOUTE LA LARGEUR
-        # de l'image si la voiture touche les bords
-        # YOLO rate souvent la partie droite ou gauche
+        # BOUNDING BOX sur l'image 900x500
+        # Les coordonnées YOLO matchent maintenant pile
         # ===============================================
         raw_x1 = min(d["box"][0] for d in cars)
         raw_y1 = min(d["box"][1] for d in cars)
         raw_x2 = max(d["box"][2] for d in cars)
         raw_y2 = max(d["box"][3] for d in cars)
 
-        # Si YOLO s'arrête à moins de 150px du bord → on force jusqu'au bord
-        x1 = 0         if raw_x1 < 150              else max(0,     raw_x1 - 20)
-        x2 = img_w     if (img_w - raw_x2) < 150    else min(img_w, raw_x2 + 20)
-        y1 = 0         if raw_y1 < 80               else max(0,     raw_y1 - 15)
-        y2 = img_h     if (img_h - raw_y2) < 80     else min(img_h, raw_y2 + 15)
+        # Si YOLO s'arrête à moins de 150px d'un bord → on force au bord
+        x1 = 0      if raw_x1 < 150             else max(0,     raw_x1 - 15)
+        x2 = img_w  if (img_w - raw_x2) < 150   else min(img_w, raw_x2 + 15)
+        y1 = 0      if raw_y1 < 80              else max(0,     raw_y1 - 10)
+        y2 = img_h  if (img_h - raw_y2) < 80    else min(img_h, raw_y2 + 10)
 
         car_crop = img[y1:y2, x1:x2]
         if car_crop.size == 0:
@@ -115,26 +129,18 @@ def analyse():
 
         # ===============================================
         # MASQUE CARROSSERIE
-        # Exclure vitres / roues / fond / ciel
         # ===============================================
         hsv_full = cv2.cvtColor(car_crop, cv2.COLOR_BGR2HSV)
 
-        # Trop sombre → vitres, pneus, joints (V < 45)
-        mask_dark = cv2.inRange(hsv_full, (0, 0, 0), (180, 255, 45))
-
-        # Blanc pur désaturé → ciel / fond (S < 18, V > 210)
-        mask_sky = cv2.inRange(hsv_full, (0, 0, 210), (180, 18, 255))
-
-        # Carrosserie = tout sauf dark + sky
+        mask_dark = cv2.inRange(hsv_full, (0, 0, 0),   (180, 255, 45))
+        mask_sky  = cv2.inRange(hsv_full, (0, 0, 210), (180, 18, 255))
         mask_body = cv2.bitwise_not(cv2.bitwise_or(mask_dark, mask_sky))
 
-        # Morphologie : boucher les petits trous dans le masque
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        kernel    = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
         mask_body = cv2.morphologyEx(mask_body, cv2.MORPH_CLOSE, kernel)
 
         # ===============================================
-        # ÉTAPE 1 : MOYENNE GLOBALE CARROSSERIE
-        # sur toute la voiture (roue à roue)
+        # MOYENNE GLOBALE CARROSSERIE
         # ===============================================
         all_valid = hsv_full[mask_body > 0]
         if len(all_valid) < 100:
@@ -147,19 +153,8 @@ def analyse():
         ])
 
         # ===============================================
-        # ÉTAPE 2 : 3 ZONES HORIZONTALES
-        #
-        # On définit la bande carrosserie verticalement :
-        # - haut  : on ignore le toit (15% haut)
-        # - bas   : on ignore les roues (80% bas)
-        #
-        # Horizontalement : 3 zones égales sur la largeur
-        # pour s'adapter à n'importe quelle voiture
-        #
-        #  |--- 33% ---|--- 34% ---|--- 33% ---|
-        #  aile avant    portes     aile arrière
+        # 3 ZONES sur la bande carrosserie
         # ===============================================
-
         band_y1 = int(crop_h * 0.15)
         band_y2 = int(crop_h * 0.80)
 
@@ -167,33 +162,20 @@ def analyse():
         cut2 = int(crop_w * 0.67)
 
         zones = [
-            {
-                "name": "Aile avant",
-                "xA": 0,     "xB": cut1,
-                "yA": band_y1, "yB": band_y2
-            },
-            {
-                "name": "Portes",
-                "xA": cut1,  "xB": cut2,
-                "yA": band_y1, "yB": band_y2
-            },
-            {
-                "name": "Aile arriere",
-                "xA": cut2,  "xB": crop_w,
-                "yA": band_y1, "yB": band_y2
-            },
+            {"name": "Aile avant",   "xA": 0,    "xB": cut1, "yA": band_y1, "yB": band_y2},
+            {"name": "Portes",       "xA": cut1, "xB": cut2, "yA": band_y1, "yB": band_y2},
+            {"name": "Aile arriere", "xA": cut2, "xB": crop_w, "yA": band_y1, "yB": band_y2},
         ]
 
         # ===============================================
-        # ÉTAPE 3 : COMPARER CHAQUE ZONE
-        # à la moyenne globale
+        # DESSIN SUR L'IMAGE 900x500
         # ===============================================
         final_img = img.copy()
 
-        # Contour total voiture (blanc fin)
+        # Contour total voiture
         cv2.rectangle(final_img, (x1, y1), (x2, y2), (220, 220, 220), 1)
 
-        # Ligne de séparation des zones (pointillés blancs)
+        # Lignes séparatrices pointillées
         for cut in [cut1, cut2]:
             for dy in range(band_y1, band_y2, 12):
                 cv2.line(
@@ -214,6 +196,7 @@ def analyse():
                 hsv_full, mask_body, xA, yA, xB, yB
             )
 
+            # Coordonnées absolues dans final_img
             abs_x1 = x1 + xA
             abs_y1 = y1 + yA
             abs_x2 = x1 + xB
@@ -228,76 +211,47 @@ def analyse():
                 diff = float(np.linalg.norm(zone_color - ref_color))
 
                 if diff < 10:
-                    color_rect = (0, 210, 0)       # vert  — OK
+                    color_rect = (0, 210, 0)
                     verdict    = "OK"
                 elif diff < 28:
-                    color_rect = (0, 165, 255)     # orange — légère variation
+                    color_rect = (0, 165, 255)
                     verdict    = "Legere variation"
                     detected  += 1
                 else:
-                    color_rect = (0, 0, 255)       # rouge — suspect
+                    color_rect = (0, 0, 255)
                     verdict    = "SUSPECT - verifier"
                     detected  += 1
 
                 label_score = str(int(diff))
 
-            # --- Grand rectangle zone ---
-            cv2.rectangle(
-                final_img,
-                (abs_x1, abs_y1),
-                (abs_x2, abs_y2),
-                color_rect,
-                5
-            )
+            # Grand rectangle
+            cv2.rectangle(final_img, (abs_x1, abs_y1), (abs_x2, abs_y2), color_rect, 5)
 
-            # --- Fond noir semi-transparent pour lisibilité texte ---
+            # Fond texte semi-transparent
             overlay = final_img.copy()
-            cv2.rectangle(
-                overlay,
-                (abs_x1,     abs_y1),
-                (abs_x2,     abs_y1 + 52),
-                (0, 0, 0), -1
-            )
+            cv2.rectangle(overlay, (abs_x1, abs_y1), (abs_x2, abs_y1 + 55), (0, 0, 0), -1)
             cv2.addWeighted(overlay, 0.5, final_img, 0.5, 0, final_img)
 
-            # --- Nom de la zone ---
-            cv2.putText(
-                final_img,
-                zone["name"],
-                (abs_x1 + 8, abs_y1 + 20),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.6,
-                (255, 255, 255),
-                2
-            )
+            # Nom zone
+            cv2.putText(final_img, zone["name"],
+                        (abs_x1 + 8, abs_y1 + 22),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
 
-            # --- Écart + verdict ---
-            cv2.putText(
-                final_img,
-                f"Ecart: {label_score}",
-                (abs_x1 + 8, abs_y1 + 40),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.5,
-                color_rect,
-                2
-            )
+            # Écart
+            cv2.putText(final_img, f"Ecart: {label_score}",
+                        (abs_x1 + 8, abs_y1 + 44),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, color_rect, 2)
 
-            # --- Verdict en bas du rectangle ---
-            cv2.putText(
-                final_img,
-                verdict,
-                (abs_x1 + 8, abs_y2 - 10),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.55,
-                color_rect,
-                2
-            )
+            # Verdict en bas
+            cv2.putText(final_img, verdict,
+                        (abs_x1 + 8, abs_y2 - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, color_rect, 2)
 
             results_zones.append({
-                "zone":      zone["name"],
-                "diff":      round(diff, 1),
-                "pixels":    px_count,
-                "verdict":   verdict
+                "zone":    zone["name"],
+                "diff":    round(diff, 1),
+                "pixels":  px_count,
+                "verdict": verdict
             })
 
         # ===============================================
@@ -314,20 +268,21 @@ def analyse():
         else:
             result = "Difference importante — repeinture probable"
 
-        # Teinte de référence en bas de l'image
+        # Référence globale en bas
         cv2.putText(
             final_img,
-            f"Ref globale : H={int(ref_color[0])}  S={int(ref_color[1])}  V={int(ref_color[2])}",
+            f"Ref : H={int(ref_color[0])}  S={int(ref_color[1])}  V={int(ref_color[2])}",
             (10, img_h - 10),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.45,
-            (200, 200, 200),
-            1
+            cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1
         )
 
         analysed_name = "analysed_" + filename
         analysed_path = os.path.join(UPLOAD_FOLDER, analysed_name)
         cv2.imwrite(analysed_path, final_img)
+
+        # Nettoyer le fichier temporaire redimensionné
+        if os.path.exists(resized_path):
+            os.remove(resized_path)
 
         return jsonify({
             "yolo":           yolo_result,
