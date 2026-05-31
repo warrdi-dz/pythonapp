@@ -17,17 +17,13 @@ os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 # =========================
 def call_yolo(image_path):
     url = "https://warrdi.com/pytho/detect"
-
     try:
         with open(image_path, "rb") as f:
             files = {"image": f}
             r = requests.post(url, files=files, timeout=20)
-
         if r.status_code == 200:
             return r.json()
-
         return {"error": "YOLO failed", "status": r.status_code}
-
     except Exception as e:
         return {"error": "YOLO exception", "details": str(e)}
 
@@ -53,9 +49,6 @@ def home():
 
 # =========================
 # ANALYSE
-# =========================
-# =========================
-# ANALYSE INTELLIGENTE
 # =========================
 @app.route("/analyse", methods=["POST"])
 def analyse():
@@ -102,49 +95,38 @@ def analyse():
 
         # =============================================
         # MASQUE : EXCLURE VITRES / ROUES / FOND
-        # On travaille uniquement sur la carrosserie
         # =============================================
         hsv_full = cv2.cvtColor(car_crop, cv2.COLOR_BGR2HSV)
 
-        # Masque 1 : exclure les zones très sombres (vitres, pneus, joints)
-        # V < 40 = trop sombre = pas de la carrosserie
+        # V < 40 = trop sombre (vitres, pneus, joints)
         mask_dark = cv2.inRange(hsv_full, (0, 0, 0), (180, 255, 50))
 
-        # Masque 2 : exclure les zones très désaturées ET sombres (ciel, fond)
-        # S < 15 ET V > 200 = blanc pur = ciel/fond
+        # S < 15 ET V > 200 = blanc pur (ciel, fond)
         mask_sky = cv2.inRange(hsv_full, (0, 0, 200), (180, 15, 255))
 
-        # Masque final carrosserie = tout sauf vitres/roues/fond
+        # Masque carrosserie = tout sauf vitres/roues/fond
         mask_body = cv2.bitwise_not(cv2.bitwise_or(mask_dark, mask_sky))
 
-        # Appliquer le masque : zones exclues = noir
-        car_body = car_crop.copy()
-        car_body[mask_body == 0] = 0
-
         # =============================================
-        # GRILLE 6x8 FINE SUR LA ZONE CARROSSERIE
+        # GRILLE 6x8 SUR LA CARROSSERIE
         # =============================================
         rows, cols = 6, 8
         cell_h = crop_h // rows
         cell_w = crop_w // cols
 
-        # Calculer la couleur HSV médiane de chaque cellule
-        # (uniquement pixels valides = carrosserie)
-        cell_colors = []   # liste de (i, j, h_med, s_med, v_med, pixel_count)
+        cell_colors = []
 
         for i in range(rows):
             for j in range(cols):
                 yA, yB = i * cell_h, (i + 1) * cell_h
                 xA, xB = j * cell_w, (j + 1) * cell_w
 
-                zone_mask  = mask_body[yA:yB, xA:xB]
-                zone_hsv   = hsv_full[yA:yB, xA:xB]
+                zone_mask = mask_body[yA:yB, xA:xB]
+                zone_hsv  = hsv_full[yA:yB, xA:xB]
 
-                # Pixels valides uniquement
                 valid_pixels = zone_hsv[zone_mask > 0]
 
                 if len(valid_pixels) < 50:
-                    # Moins de 50 pixels valides = zone vitres/roues, on ignore
                     cell_colors.append((i, j, None, None, None, 0))
                     continue
 
@@ -155,8 +137,7 @@ def analyse():
                 cell_colors.append((i, j, h_med, s_med, v_med, len(valid_pixels)))
 
         # =============================================
-        # RÉFÉRENCE : médiane de TOUTES les cellules
-        # valides (carrosserie propre)
+        # RÉFÉRENCE : médiane des cellules valides
         # =============================================
         valid_cells = [(c[2], c[3], c[4]) for c in cell_colors if c[2] is not None]
 
@@ -169,8 +150,7 @@ def analyse():
         ref_color = np.array([ref_h, ref_s, ref_v])
 
         # =============================================
-        # DESSIN : colorier chaque cellule selon
-        # son écart à la référence carrosserie
+        # DESSIN RÉSULTAT
         # =============================================
         final_img = img.copy()
 
@@ -191,7 +171,7 @@ def analyse():
             abs_y2 = y1 + yB
 
             if h_med is None:
-                # Zone exclue (vitres/roues) — contour gris fin
+                # Zone exclue — contour gris fin
                 cv2.rectangle(final_img, (abs_x1, abs_y1), (abs_x2, abs_y2),
                               (100, 100, 100), 1)
                 continue
@@ -200,27 +180,21 @@ def analyse():
             diff = np.linalg.norm(cell_color - ref_color)
             zones_scores.append(diff)
 
-            # Seuils affinés
             if diff < 15:
-                # OK — pas de rectangle
-                pass
+                pass  # OK — rien à dessiner
             elif diff < 30:
-                # Légère variation — vert
                 cv2.rectangle(final_img, (abs_x1, abs_y1), (abs_x2, abs_y2),
                               (0, 255, 0), 2)
                 detected += 1
             elif diff < 55:
-                # Zone suspecte — orange
                 cv2.rectangle(final_img, (abs_x1, abs_y1), (abs_x2, abs_y2),
                               (0, 165, 255), 3)
                 detected += 1
             else:
-                # Forte différence — rouge épais
                 cv2.rectangle(final_img, (abs_x1, abs_y1), (abs_x2, abs_y2),
                               (0, 0, 255), 3)
                 detected += 1
 
-            # Score affiché dans la cellule
             cv2.putText(
                 final_img,
                 str(int(diff)),
@@ -260,4 +234,11 @@ def analyse():
         return jsonify({
             "error": str(e),
             "trace": traceback.format_exc()
-        }), 500 port=5000)
+        }), 500
+
+
+# =========================
+# RUN SERVER
+# =========================
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000)
