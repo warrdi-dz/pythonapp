@@ -109,10 +109,11 @@ def analyse():
         car = None
 
         try:
-            cars = [
-                d for d in yolo_result.get("detections", [])
-                if d["class"] == 2
-            ]
+            cars = sorted(
+             [d for d in yolo_result.get("detections", []) if d.get("class") == 2],
+             key=lambda x: (x.get("conf", 0)),
+             reverse=True
+             )
 
             if cars:
                 x1, y1, x2, y2 = cars[0]["box"]
@@ -122,23 +123,30 @@ def analyse():
         except:
             car = None
 
-        # FALLBACK IF YOLO FAIL
-        if car is None or car.size == 0:
+        # =========================
+# YOLO CAR DETECTION ONLY
+# =========================
 
-            edges = cv2.Canny(blur, 70, 140)
-            contours, _ = cv2.findContours(
-                edges,
-                cv2.RETR_EXTERNAL,
-                cv2.CHAIN_APPROX_SIMPLE
-            )
+       cars = [
+        d for d in yolo_result.get("detections", [])
+        if d.get("class") == 2 and d.get("conf", 0) > 0.5
+        ]
 
-            if len(contours) == 0:
-                return jsonify({"error": "no vehicle detected"}), 400
+       if not cars:
+       return jsonify({
+        "error": "no vehicle detected by YOLO",
+        "yolo": yolo_result
+       }), 400
 
-            car_contour = max(contours, key=cv2.contourArea)
-            x, y, w, h = cv2.boundingRect(car_contour)
+       x1, y1, x2, y2 = cars[0]["box"]
 
-            car = gray[y:y+h, x:x+w]
+       car = gray[y1:y2, x1:x2]
+
+       if car is None or car.size == 0:
+       return jsonify({
+        "error": "invalid crop from YOLO",
+        "yolo": yolo_result
+        }), 400
 
         car = cv2.resize(car, (600, 300))
 
