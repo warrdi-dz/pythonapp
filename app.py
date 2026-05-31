@@ -184,12 +184,14 @@ def analyse():
         cv2.imwrite(analysed_path, original)
 
         return jsonify({
-            "yolo": yolo_result,
-            "score": final_score,
-            "result": result,
-            "parts_score": part_scores,
-            "detected_parts": detected_parts,
-            "image_url": request.host_url + "uploads/" + analysed_name
+       "yolo": yolo_result,
+       "score": final_score,
+       "result": result,
+       "parts_score": part_scores,
+       "detected_parts": detected_parts,
+
+       "image_result": analysed_name,   # ← AJOUTER
+       "image_url": request.host_url + "uploads/" + analysed_name
         })
 
     except Exception as e:
