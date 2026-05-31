@@ -93,17 +93,24 @@ def analyse():
 
         if not cars:
             return jsonify({"error": "Car not detected"}), 400
-
+        
         x1, y1, x2, y2 = cars[0]["box"]
 
         h_img, w_img = gray.shape
 
-        x1 = max(0, min(x1, w_img - 1))
-        x2 = max(0, min(x2, w_img - 1))
-        y1 = max(0, min(y1, h_img - 1))
-        y2 = max(0, min(y2, h_img - 1))
+        pad = 10
 
-        car_gray = cv2.resize(gray[y1:y2, x1:x2], (600, 300))
+        x1 = max(0, x1 + pad)
+        y1 = max(0, y1 + pad)
+        x2 = max(0, x2 - pad)
+        y2 = max(0, y2 - pad)
+
+        car_gray = gray[y1:y2, x1:x2]
+
+        # 🔥 améliore contraste (IMPORTANT)
+        car_gray = cv2.equalizeHist(car_gray)
+
+        car_gray = cv2.resize(car_gray, (600, 300))
         car_color = cv2.resize(img[y1:y2, x1:x2], (600, 300))
 
         # =========================
@@ -129,16 +136,16 @@ def analyse():
 
             score = 0
 
-            if texture < 60:
-                score += 40
-            if texture > 250:
-                score += 25
-            if brightness > 175 or brightness < 65:
-                score += 30
-            if 80 < brightness < 120 and texture < 90:
-                score += 35
-            if color_var > 12:
-                score += 30
+            if texture < 30:
+              score += 20
+            elif texture < 60:
+              score += 10
+
+            if brightness < 60 or brightness > 200:
+              score += 15
+
+            if color_var > 25:
+              score += 20
 
             return score
 
@@ -177,7 +184,8 @@ def analyse():
         mean_score = np.mean(zones_scores)
         max_score = np.max(zones_scores)
 
-        final_score = int((mean_score * 0.5) + (max_score * 0.5))
+        final_score = int(sum(zones_scores.values()) / len(zones_scores))
+        final_score = min(final_score, 100)
 
         if final_score < 20:
             result = "Peinture d'origine (OK)"
@@ -201,14 +209,17 @@ def analyse():
         analysed_path = os.path.join(UPLOAD_FOLDER, analysed_name)
 
         cv2.imwrite(analysed_path, final_img)
+            
+       return jsonify({
+           "yolo": yolo_result,
+           "score": final_score,
+           "result": result,
+           "zones_scores": zones_scores,
+           "zones_detected": detected,
 
-        return jsonify({
-            "yolo": yolo_result,
-            "score": final_score,
-            "result": result,
-            "zones_detected": detected,
-            "image_url": request.host_url + "uploads/" + analysed_name
-        })
+           "image_result": analysed_name,   # <- obligatoire pour PHP
+           "image_url": request.host_url + "uploads/" + analysed_name
+        }))
 
     except Exception as e:
         return jsonify({
