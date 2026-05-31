@@ -57,7 +57,7 @@ def home():
 # =========================
 @app.route("/analyse", methods=["POST"])
 def analyse():
-
+    
     try:
         if "image" not in request.files:
             return jsonify({"error": "no image"}), 400
@@ -105,119 +105,137 @@ def analyse():
         x2 = max(0, x2 - pad)
         y2 = max(0, y2 - pad)
 
-        car_gray = gray[y1:y2, x1:x2]
-
-        # 🔥 améliore contraste (IMPORTANT)
-        car_gray = cv2.equalizeHist(car_gray)
-
-        car_gray = cv2.resize(car_gray, (600, 300))
-        car_color = cv2.resize(img[y1:y2, x1:x2], (600, 300))
-
         # =========================
-        # GRID HEATMAP
+        # ANALYSE COULEUR DOMINANTE
         # =========================
-        h, w = car_gray.shape
 
-        rows = 4
-        cols = 6
+        car_crop = img[y1:y2, x1:x2]
+
+        if car_crop.size == 0:
+            return jsonify({"error": "invalid crop"}), 400
+
+        h, w, _ = car_crop.shape
+
+        rows = 6
+        cols = 8
 
         cell_h = h // rows
         cell_w = w // cols
 
-        heatmap = np.zeros((h, w), dtype=np.uint8)
+        global_b = np.mean(car_crop[:, :, 0])
+        global_g = np.mean(car_crop[:, :, 1])
+        global_r = np.mean(car_crop[:, :, 2])
+
+        global_color = np.array([
+            global_b,
+            global_g,
+            global_r
+        ])
 
         zones_scores = []
         detected = 0
 
-        def score_zone(zone):
-            brightness = np.mean(zone)
-            texture = cv2.Laplacian(zone, cv2.CV_64F).var()
-            color_var = np.std(zone)
-
-            score = 0
-
-# texture
-            if texture < 30:
-               score += 40
-            elif texture < 60:
-               score += 25
-            elif texture < 100:
-             score += 10
-
-          # luminosité
-            if brightness < 70 or brightness > 180:
-             score += 30
-
-# variation
-            if color_var > 15:
-             score += 30
-            elif color_var > 8:
-             score += 15
-
-            return score
+        # image originale
+        final_img = img.copy()
 
         for i in range(rows):
             for j in range(cols):
 
-                yA = i * cell_h
-                yB = (i + 1) * cell_h
-                xA = j * cell_w
-                xB = (j + 1) * cell_w
+                local_y1 = i * cell_h
+                local_y2 = (i + 1) * cell_h
 
-                zone = car_gray[yA:yB, xA:xB]
-                s = score_zone(zone)
+                local_x1 = j * cell_w
+                local_x2 = (j + 1) * cell_w
 
-                zones_scores.append(s)
+                zone = car_crop[
+                    local_y1:local_y2,
+                    local_x1:local_x2
+                ]
 
-                # HEAT COLOR
-                if s >= 60:
-                     heatmap[yA:yB, xA:xB] = 255
-                     color = (0, 0, 255)      # rouge
-                elif s >= 30:
-                     heatmap[yA:yB, xA:xB] = 180
-                     color = (0, 255, 0)      # vert
-                else:
-                     color = None
+                if zone.size == 0:
+                    continue
 
-                if color:
-                    cv2.rectangle(car_color, (xA, yA), (xB, yB), color, 1)
+                mean_b = np.mean(zone[:, :, 0])
+                mean_g = np.mean(zone[:, :, 1])
+                mean_r = np.mean(zone[:, :, 2])
 
-                if s >= 50:
+                zone_color = np.array([
+                    mean_b,
+                    mean_g,
+                    mean_r
+                ])
+
+                diff = np.linalg.norm(
+                    zone_color - global_color
+                )
+
+                score = int(diff)
+
+                zones_scores.append(score)
+
+                abs_x1 = x1 + local_x1
+                abs_y1 = y1 + local_y1
+                abs_x2 = x1 + local_x2
+                abs_y2 = y1 + local_y2
+
+                # zone légèrement différente
+                if diff > 40:
+
                     detected += 1
 
-        # =========================
-        # FINAL SCORE
-        # =========================
-        mean_score = np.mean(zones_scores)
-        max_score = np.max(zones_scores)
+                    cv2.rectangle(
+                        final_img,
+                        (abs_x1, abs_y1),
+                        (abs_x2, abs_y2),
+                        (0, 255, 0),
+                        2
+                    )
 
-        final_score = int(np.mean(zones_scores))
+                # zone très différente
+                if diff > 70:
+
+                    cv2.rectangle(
+                        final_img,
+                        (abs_x1, abs_y1),
+                        (abs_x2, abs_y2),
+                        (0, 0, 255),
+                        3
+                    )
+
+        # =========================
+        # SCORE FINAL
+        # =========================
+
+        if len(zones_scores) == 0:
+            final_score = 0
+        else:
+            final_score = int(np.max(zones_scores))
+
         final_score = min(final_score, 100)
 
         if final_score < 20:
             result = "Peinture d'origine (OK)"
-        elif final_score < 45:
-            result = "Légères retouches"
+        elif final_score < 40:
+            result = "Différence légère détectée"
         elif final_score < 70:
             result = "Peinture suspecte"
         else:
-            result = "Voiture probablement repeinte"
-
-        # =========================
-        # HEATMAP FINAL IMAGE
-        # =========================
-        heatmap_color = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)
-        final_img = cv2.addWeighted(car_color, 0.7, heatmap_color, 0.3, 0)
+            result = "Zone fortement différente"
 
         # =========================
         # SAVE IMAGE
         # =========================
+
         analysed_name = "analysed_" + filename
-        analysed_path = os.path.join(UPLOAD_FOLDER, analysed_name)
+        analysed_path = os.path.join(
+            UPLOAD_FOLDER,
+            analysed_name
+        )
 
-        cv2.imwrite(analysed_path, final_img)
-            
-
+        cv2.imwrite(
+            analysed_path,
+            final_img
+        )
 
         return jsonify({
             "yolo": yolo_result,
@@ -227,14 +245,13 @@ def analyse():
             "zones_detected": detected,
             "image_result": analysed_name,
             "image_url": request.host_url + "uploads/" + analysed_name
-        })
-
+        }) 
+                                   
     except Exception as e:
-        return jsonify({
-            "error": str(e),
-            "trace": traceback.format_exc()
-        }), 500
-
+            return jsonify({
+                "error": str(e),
+                "trace": traceback.format_exc()
+            }), 500
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+     app.run(host="0.0.0.0", port=5000)
