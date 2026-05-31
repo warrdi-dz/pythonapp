@@ -7,7 +7,7 @@ import traceback
 from werkzeug.utils import secure_filename
 from ultralytics import YOLO
 
-model = YOLO("yolov8n.pt")
+
 model = None
 app = Flask(__name__)
 
@@ -54,7 +54,7 @@ def analyse():
         # =========================
         results = model(img)
 
-        car_found = false
+        car_found = False
 
         for r in results:
             for box in r.boxes:
