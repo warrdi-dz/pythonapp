@@ -22,7 +22,7 @@ def call_yolo(image_path):
     try:
         with open(image_path, "rb") as f:
             files = {"image": f}
-            r = requests.post(url, files=files, timeout=15)
+            r = requests.post(url, files=files, timeout=20)
 
         if r.status_code == 200:
             return r.json()
@@ -34,7 +34,7 @@ def call_yolo(image_path):
 
 
 # =========================
-# UPLOAD ROUTE
+# UPLOADS
 # =========================
 @app.route("/uploads/<filename>")
 def uploads(filename):
@@ -48,23 +48,22 @@ def uploads(filename):
 def home():
     return jsonify({
         "status": "OK",
-        "message": "WARRDI SCAN API"
+        "message": "WARRDI SCAN API + YOLO"
     })
 
 
 # =========================
-# MAIN ANALYSE
+# ANALYSE
 # =========================
 @app.route("/analyse", methods=["POST"])
 def analyse():
 
     try:
 
-        # CHECK IMAGE
-        if 'image' not in request.files:
+        if "image" not in request.files:
             return jsonify({"error": "no image"}), 400
 
-        file = request.files['image']
+        file = request.files["image"]
 
         filename = str(int(time.time())) + "_" + secure_filename(file.filename)
         path = os.path.join(UPLOAD_FOLDER, filename)
@@ -72,7 +71,7 @@ def analyse():
         file.save(path)
 
         # =========================
-        # YOLO CALL (REMOTE SERVER)
+        # YOLO CALL
         # =========================
         yolo_result = call_yolo(path)
 
@@ -82,189 +81,118 @@ def analyse():
         img = cv2.imread(path)
 
         if img is None:
-            return jsonify({"error": "image not readable"}), 400
+            return jsonify({"error": "image unreadable"}), 400
 
         img = cv2.resize(img, (900, 500))
         original = img.copy()
 
-        # =========================
-        # REFLECTION REMOVAL
-        # =========================
-        hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
-        mask_reflet = cv2.inRange(
-            hsv,
-            np.array([0, 0, 220]),
-            np.array([180, 60, 255])
+        # =========================
+        # EXTRACT CAR FROM YOLO
+        # =========================
+        detections = yolo_result.get("detections", [])
+
+        cars = sorted(
+            [d for d in detections if d.get("class") == 2],
+            key=lambda x: x.get("conf", 0),
+            reverse=True
         )
 
-        img = cv2.inpaint(img, mask_reflet, 7, cv2.INPAINT_TELEA)
+        if not cars:
+            return jsonify({
+                "error": "Car not detected by YOLO",
+                "yolo": yolo_result
+            }), 400
 
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        blur = cv2.GaussianBlur(gray, (5, 5), 0)
+        x1, y1, x2, y2 = cars[0]["box"]
 
-        # =========================
-       
-# YOLO CAR DETECTION ONLY
-# =========================
+        h_img, w_img = gray.shape
 
-       cars = [
-        d for d in yolo_result.get("detections", [])
-        if d.get("class") == 2 and d.get("conf", 0) > 0.5
-        ]
+        # clamp sécurité
+        x1 = max(0, min(x1, w_img - 1))
+        x2 = max(0, min(x2, w_img - 1))
+        y1 = max(0, min(y1, h_img - 1))
+        y2 = max(0, min(y2, h_img - 1))
 
-       if not cars:
-       return jsonify({
-        "error": "no vehicle detected by YOLO",
-        "yolo": yolo_result
-       }), 400
+        car = gray[y1:y2, x1:x2]
 
-       x1, y1, x2, y2 = cars[0]["box"]
-
-       car = gray[y1:y2, x1:x2]
-
-       if car is None or car.size == 0:
-       return jsonify({
-        "error": "invalid crop from YOLO",
-        "yolo": yolo_result
-        }), 400
+        if car.size == 0:
+            return jsonify({"error": "invalid YOLO crop"}), 400
 
         car = cv2.resize(car, (600, 300))
 
         # =========================
-        # DIVISION ZONES
+        # PARTS DETECTION (SIMPLIFIED)
         # =========================
-        left = car[:, :200]
-        center = car[:, 200:400]
-        right = car[:, 400:]
 
-        heatmap = np.zeros_like(car)
+        parts = {
+            "capot": car[:150, :],
+            "pare_choc_avant": car[0:100, :],
+            "pare_choc_arriere": car[200:300, :],
+            "porte_gauche": car[:, :200],
+            "porte_droite": car[:, 400:],
+        }
 
-        score = 0
-        zones = 0
+        def analyze(part):
+            brightness = np.mean(part)
+            texture = cv2.Laplacian(part, cv2.CV_64F).var()
+            color_var = np.std(part)
 
-        # =========================
-        # ANALYSE ZONE FUNCTION
-        # =========================
-        def analyse_zone(zone, x_offset):
-
-            nonlocal score, zones
-
-            brightness = np.mean(zone)
-            texture = cv2.Laplacian(zone, cv2.CV_64F).var()
-            color_var = np.std(zone)
-
-            local_score = 0
+            score = 0
 
             if texture < 60:
-                local_score += 40
+                score += 40
             if texture > 250:
-                local_score += 25
+                score += 25
             if brightness > 175 or brightness < 65:
-                local_score += 30
+                score += 30
             if 80 < brightness < 120 and texture < 90:
-                local_score += 35
+                score += 35
             if color_var > 12:
-                local_score += 30
+                score += 30
 
-            if local_score >= 50:
+            return score
 
-                zones += 1
-                score += local_score
+        part_scores = {}
+        total_score = 0
+        detected_parts = 0
 
-                h, w = zone.shape
+        for name, zone in parts.items():
 
-                cv2.rectangle(
-                    original,
-                    (x_offset, 0),
-                    (x_offset + w, h),
-                    (0, 0, 255),
-                    2
-                )
+            s = analyze(zone)
+            part_scores[name] = int(s)
 
-                cv2.rectangle(
-                    heatmap,
-                    (x_offset, 0),
-                    (x_offset + w, h),
-                    255,
-                    -1
-                )
+            if s >= 50:
+                detected_parts += 1
+                total_score += s
 
-        # =========================
-        # APPLY ANALYSIS
-        # =========================
-        analyse_zone(left, 0)
-        analyse_zone(center, 200)
-        analyse_zone(right, 400)
+        final_score = int(min(total_score, 100))
 
-        # =========================
-        # SYMMETRY CHECK
-        # =========================
-        left_mean = np.mean(left)
-        right_mean = np.mean(right)
-
-        symmetry_diff = abs(left_mean - right_mean)
-
-        if symmetry_diff > 25:
-            score += 20
-            cv2.putText(
-                original,
-                "ASYMMETRIE PEINTURE",
-                (20, 30),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.7,
-                (0, 0, 255),
-                2
-            )
-
-        # =========================
-        # HEATMAP
-        # =========================
-        heat_color = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)
-
-        heat_color = cv2.resize(
-            heat_color,
-            (original.shape[1], original.shape[0])
-        )
-
-        final = cv2.addWeighted(original, 0.85, heat_color, 0.35, 0)
-
-        # =========================
-        # FINAL SCORE
-        # =========================
-        score = int(min(score, 100))
-
-        if score < 20:
+        if final_score < 20:
             result = "Peinture d'origine (OK)"
-        elif score < 45:
-            result = "Légères retouches possibles"
-        elif score < 70:
-            result = "Peinture probablement refaite"
+        elif final_score < 45:
+            result = "Légères retouches"
+        elif final_score < 70:
+            result = "Peinture suspecte"
         else:
-            result = "Forte suspicion de carrosserie repeinte"
+            result = "Voiture probablement repeinte"
 
-        # =========================
-        # SAVE RESULT
-        # =========================
         analysed_name = "analysed_" + filename
         analysed_path = os.path.join(UPLOAD_FOLDER, analysed_name)
 
-        cv2.imwrite(analysed_path, final)
+        cv2.imwrite(analysed_path, original)
 
         return jsonify({
             "yolo": yolo_result,
-            "score": score,
+            "score": final_score,
             "result": result,
-            "zones_detected": zones,
-            "symmetry_diff": float(symmetry_diff),
-            "image_result": analysed_name,
+            "parts_score": part_scores,
+            "detected_parts": detected_parts,
             "image_url": request.host_url + "uploads/" + analysed_name
         })
 
     except Exception as e:
-
-        print(traceback.format_exc())
-
         return jsonify({
             "error": str(e),
             "trace": traceback.format_exc()
