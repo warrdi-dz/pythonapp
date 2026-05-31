@@ -77,22 +77,36 @@ def analyse():
             return jsonify({"error": "image unreadable"}), 400
 
         img = cv2.resize(img, (900, 500))
+        img_h, img_w = img.shape[:2]
 
         detections = yolo_result.get("detections", [])
 
-        cars = sorted(
-            [d for d in detections if d.get("class") == 2],
-            key=lambda x: x.get("conf", 0),
-            reverse=True
-        )
+        # --- Toutes les détections voiture (class 2) ---
+        cars = [d for d in detections if d.get("class") == 2]
 
         if not cars:
             return jsonify({"error": "Car not detected"}), 400
 
-        x1, y1, x2, y2 = cars[0]["box"]
+        # =========================
+        # FUSION DE TOUTES LES
+        # BOUNDING BOXES VOITURE
+        # =========================
+        PADDING = 25
 
-        x1, y1 = max(0, x1), max(0, y1)
-        x2, y2 = max(0, x2), max(0, y2)
+        x1 = max(0,     min(d["box"][0] for d in cars) - PADDING)
+        y1 = max(0,     min(d["box"][1] for d in cars) - PADDING)
+        x2 = min(img_w, max(d["box"][2] for d in cars) + PADDING)
+        y2 = min(img_h, max(d["box"][3] for d in cars) + PADDING)
+
+        # Si la voiture touche les bords, on force jusqu'au bord
+        if (img_w - x2) < 60:
+            x2 = img_w
+        if (img_h - y2) < 60:
+            y2 = img_h
+        if x1 < 60:
+            x1 = 0
+        if y1 < 60:
+            y1 = 0
 
         car_crop = img[y1:y2, x1:x2]
 
@@ -111,15 +125,24 @@ def analyse():
         ])
 
         # =========================
-        # GRID 3x3
+        # GRILLE 4x6 (plus fine)
         # =========================
-        rows, cols = 3, 3
+        rows, cols = 4, 6
         h, w, _ = car_crop.shape
 
         cell_h = h // rows
         cell_w = w // cols
 
         final_img = img.copy()
+
+        # Dessiner le contour de la zone analysée
+        cv2.rectangle(
+            final_img,
+            (x1, y1),
+            (x2, y2),
+            (255, 165, 0),   # orange
+            2
+        )
 
         zones_scores = []
         detected = 0
@@ -145,12 +168,15 @@ def analyse():
                 diff = np.linalg.norm(zone_color - global_color)
                 zones_scores.append(diff)
 
-                abs_x1, abs_y1 = x1 + xA, y1 + yA
-                abs_x2, abs_y2 = x1 + xB, y1 + yB
+                abs_x1 = x1 + xA
+                abs_y1 = y1 + yA
+                abs_x2 = x1 + xB
+                abs_y2 = y1 + yB
 
                 if diff > 20:
-                    color = (0, 255, 0) if diff < 45 else (0, 0, 255)
-                    thickness = 2 if diff < 45 else 3
+                    # Vert = légère variation, Rouge = forte différence
+                    color     = (0, 255, 0) if diff < 45 else (0, 0, 255)
+                    thickness = 2           if diff < 45 else 3
 
                     cv2.rectangle(
                         final_img,
@@ -179,12 +205,12 @@ def analyse():
         cv2.imwrite(analysed_path, final_img)
 
         return jsonify({
-            "yolo": yolo_result,
-            "score": final_score,
-            "result": result,
+            "yolo":           yolo_result,
+            "score":          final_score,
+            "result":         result,
             "zones_detected": detected,
-            "image_result": analysed_name,
-            "image_url": request.host_url + "uploads/" + analysed_name
+            "image_result":   analysed_name,
+            "image_url":      request.host_url + "uploads/" + analysed_name
         })
 
     except Exception as e:
