@@ -76,7 +76,7 @@ def analyse():
         if img is None:
             return jsonify({"error": "image unreadable"}), 400
 
-        img = cv2.resize(img, (900, 500))
+        h_img, w_img = img.shape[:2]
 
         detections = yolo_result.get("detections", [])
 
@@ -91,8 +91,16 @@ def analyse():
 
         x1, y1, x2, y2 = cars[0]["box"]
 
-        x1, y1 = max(0, x1), max(0, y1)
-        x2, y2 = max(0, x2), max(0, y2)
+        # =========================
+        # 🔥 FIX IMPORTANT : PADDING
+        # =========================
+        pad_x = int((x2 - x1) * 0.20)
+        pad_y = int((y2 - y1) * 0.20)
+
+        x1 = max(0, x1 - pad_x)
+        y1 = max(0, y1 - pad_y)
+        x2 = min(w_img, x2 + pad_x)
+        y2 = min(h_img, y2 + pad_y)
 
         car_crop = img[y1:y2, x1:x2]
 
@@ -100,7 +108,7 @@ def analyse():
             return jsonify({"error": "invalid crop"}), 400
 
         # =========================
-        # HSV GLOBAL
+        # HSV GLOBAL (voiture entière)
         # =========================
         car_hsv = cv2.cvtColor(car_crop, cv2.COLOR_BGR2HSV)
 
@@ -161,9 +169,15 @@ def analyse():
                     )
                     detected += 1
 
-        final_score = int(np.mean(zones_scores)) if zones_scores else 0
+        # =========================
+        # SCORE STABLE
+        # =========================
+        final_score = int(np.median(zones_scores)) if zones_scores else 0
         final_score = min(final_score, 100)
 
+        # =========================
+        # RESULT TEXT
+        # =========================
         if final_score < 20:
             result = "Peinture homogène (OK)"
         elif final_score < 40:
@@ -192,10 +206,3 @@ def analyse():
             "error": str(e),
             "trace": traceback.format_exc()
         }), 500
-
-
-# =========================
-# RUN SERVER
-# =========================
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
