@@ -104,26 +104,7 @@ def analyse():
         blur = cv2.GaussianBlur(gray, (5, 5), 0)
 
         # =========================
-        # CAR DETECTION VIA YOLO (BEST METHOD)
-        # =========================
-        car = None
-
-        try:
-            cars = sorted(
-             [d for d in yolo_result.get("detections", []) if d.get("class") == 2],
-             key=lambda x: (x.get("conf", 0)),
-             reverse=True
-             )
-
-            if cars:
-                x1, y1, x2, y2 = cars[0]["box"]
-
-                car = gray[y1:y2, x1:x2]
-
-        except:
-            car = None
-
-        # =========================
+       
 # YOLO CAR DETECTION ONLY
 # =========================
 
