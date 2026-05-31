@@ -52,14 +52,10 @@ def home():
     })
 
 
-# =========================
-# ANALYSE
-# =========================
 @app.route("/analyse", methods=["POST"])
 def analyse():
 
     try:
-
         if "image" not in request.files:
             return jsonify({"error": "no image"}), 400
 
@@ -67,19 +63,14 @@ def analyse():
 
         filename = str(int(time.time())) + "_" + secure_filename(file.filename)
         path = os.path.join(UPLOAD_FOLDER, filename)
-
         file.save(path)
 
         # =========================
-        # YOLO CALL
+        # YOLO
         # =========================
         yolo_result = call_yolo(path)
 
-        # =========================
-        # LOAD IMAGE
-        # =========================
         img = cv2.imread(path)
-
         if img is None:
             return jsonify({"error": "image unreadable"}), 400
 
@@ -89,7 +80,7 @@ def analyse():
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
         # =========================
-        # EXTRACT CAR FROM YOLO
+        # CAR DETECTION YOLO
         # =========================
         detections = yolo_result.get("detections", [])
 
@@ -100,44 +91,38 @@ def analyse():
         )
 
         if not cars:
-            return jsonify({
-                "error": "Car not detected by YOLO",
-                "yolo": yolo_result
-            }), 400
+            return jsonify({"error": "Car not detected"}), 400
 
         x1, y1, x2, y2 = cars[0]["box"]
 
         h_img, w_img = gray.shape
 
-        # clamp sécurité
         x1 = max(0, min(x1, w_img - 1))
         x2 = max(0, min(x2, w_img - 1))
         y1 = max(0, min(y1, h_img - 1))
         y2 = max(0, min(y2, h_img - 1))
 
-        car = gray[y1:y2, x1:x2]
+        car_gray = gray[y1:y2, x1:x2]
+        car_color = img[y1:y2, x1:x2]
 
-        if car.size == 0:
-            return jsonify({"error": "invalid YOLO crop"}), 400
+        if car_gray.size == 0:
+            return jsonify({"error": "invalid crop"}), 400
 
-        car = cv2.resize(car, (600, 300))
+        car_gray = cv2.resize(car_gray, (600, 300))
+        car_color = cv2.resize(car_color, (600, 300))
 
         # =========================
-        # PARTS DETECTION (SIMPLIFIED)
+        # HEATMAP INIT
         # =========================
+        heatmap = np.zeros((300, 600), dtype=np.uint8)
 
-        parts = {
-            "capot": car[:150, :],
-            "pare_choc_avant": car[0:100, :],
-            "pare_choc_arriere": car[200:300, :],
-            "porte_gauche": car[:, :200],
-            "porte_droite": car[:, 400:],
-        }
-
-        def analyze(part):
-            brightness = np.mean(part)
-            texture = cv2.Laplacian(part, cv2.CV_64F).var()
-            color_var = np.std(part)
+        # =========================
+        # ANALYSE FUNCTION
+        # =========================
+        def score_zone(zone):
+            brightness = np.mean(zone)
+            texture = cv2.Laplacian(zone, cv2.CV_64F).var()
+            color_var = np.std(zone)
 
             score = 0
 
@@ -154,20 +139,60 @@ def analyse():
 
             return score
 
-        part_scores = {}
+        # =========================
+        # ZONES PRO
+        # =========================
+        zones = {
+            "gauche": (0, 200),
+            "centre": (200, 400),
+            "droite": (400, 600)
+        }
+
+        zones_scores = {}
+        detected = 0
         total_score = 0
-        detected_parts = 0
 
-        for name, zone in parts.items():
+        for name, (xA, xB) in zones.items():
 
-            s = analyze(zone)
-            part_scores[name] = int(s)
+    zone = car_gray[:, xA:xB]
+    s = score_zone(zone)
+    zones_scores[name] = int(s)
 
-            if s >= 50:
-                detected_parts += 1
-                total_score += s
+    # score global
+    if s >= 50:
+        detected += 1
+        total_score += s
 
-        final_score = int(min(total_score, 100))
+    # =========================
+    # HEATMAP COLOR LOGIC
+    # =========================
+    if s >= 70:
+        heat_value = 255
+        color_rect = (0, 0, 255)   # rouge
+    elif s >= 50:
+        heat_value = 160
+        color_rect = (0, 165, 255) # orange
+    else:
+        heat_value = 0
+        color_rect = None
+
+    # appliquer heatmap
+    heatmap[:, xA:xB] = heat_value
+
+    # rectangle seulement si suspect
+    if color_rect is not None:
+        cv2.rectangle(
+            car_color,
+            (xA, 0),
+            (xB, 300),
+            color_rect,
+            2
+        )
+
+        # =========================
+        # FINAL SCORE
+        # =========================
+        final_score = int(np.mean(list(zones_scores.values())))
 
         if final_score < 20:
             result = "Peinture d'origine (OK)"
@@ -178,20 +203,30 @@ def analyse():
         else:
             result = "Voiture probablement repeinte"
 
+        # =========================
+        # HEATMAP FINAL
+        # =========================
+        heatmap_color = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)
+        heatmap_color = cv2.resize(heatmap_color, (600, 300))
+
+        final_img = cv2.addWeighted(car_color, 0.7, heatmap_color, 0.3, 0)
+
+        # =========================
+        # SAVE
+        # =========================
         analysed_name = "analysed_" + filename
         analysed_path = os.path.join(UPLOAD_FOLDER, analysed_name)
 
-        cv2.imwrite(analysed_path, original)
+        cv2.imwrite(analysed_path, final_img)
 
         return jsonify({
-       "yolo": yolo_result,
-       "score": final_score,
-       "result": result,
-       "parts_score": part_scores,
-       "detected_parts": detected_parts,
-
-       "image_result": analysed_name,   # ← AJOUTER
-       "image_url": request.host_url + "uploads/" + analysed_name
+            "yolo": yolo_result,
+            "score": final_score,
+            "result": result,
+            "zones_scores": zones_scores,
+            "zones_detected": detected,
+            "image_result": analysed_name,
+            "image_url": request.host_url + "uploads/" + analysed_name
         })
 
     except Exception as e:
@@ -199,7 +234,3 @@ def analyse():
             "error": str(e),
             "trace": traceback.format_exc()
         }), 500
-
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
