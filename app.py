@@ -49,19 +49,18 @@ def home():
 
 # =========================
 # COULEUR HSV MÉDIANE
-# D'UNE ZONE (pixels valides)
 # =========================
 def get_zone_color(hsv_img, mask, xA, yA, xB, yB):
     zone_mask = mask[yA:yB, xA:xB]
     zone_hsv  = hsv_img[yA:yB, xA:xB]
     valid     = zone_hsv[zone_mask > 0]
     if len(valid) < 80:
-        return None
+        return None, 0
     return np.array([
         float(np.median(valid[:, 0])),
         float(np.median(valid[:, 1])),
         float(np.median(valid[:, 2]))
-    ])
+    ]), len(valid)
 
 
 # =========================
@@ -92,20 +91,21 @@ def analyse():
         if not cars:
             return jsonify({"error": "Car not detected"}), 400
 
-        # ===========================
-        # BOUNDING BOX COMPLÈTE
-        # de roue à roue (toute la voiture)
-        # ===========================
-        PADDING = 10
-        x1 = max(0,     min(d["box"][0] for d in cars) - PADDING)
-        y1 = max(0,     min(d["box"][1] for d in cars) - PADDING)
-        x2 = min(img_w, max(d["box"][2] for d in cars) + PADDING)
-        y2 = min(img_h, max(d["box"][3] for d in cars) + PADDING)
+        # ===============================================
+        # BOUNDING BOX : ON PREND TOUTE LA LARGEUR
+        # de l'image si la voiture touche les bords
+        # YOLO rate souvent la partie droite ou gauche
+        # ===============================================
+        raw_x1 = min(d["box"][0] for d in cars)
+        raw_y1 = min(d["box"][1] for d in cars)
+        raw_x2 = max(d["box"][2] for d in cars)
+        raw_y2 = max(d["box"][3] for d in cars)
 
-        if (img_w - x2) < 60: x2 = img_w
-        if (img_h - y2) < 60: y2 = img_h
-        if x1 < 60: x1 = 0
-        if y1 < 60: y1 = 0
+        # Si YOLO s'arrête à moins de 150px du bord → on force jusqu'au bord
+        x1 = 0         if raw_x1 < 150              else max(0,     raw_x1 - 20)
+        x2 = img_w     if (img_w - raw_x2) < 150    else min(img_w, raw_x2 + 20)
+        y1 = 0         if raw_y1 < 80               else max(0,     raw_y1 - 15)
+        y2 = img_h     if (img_h - raw_y2) < 80     else min(img_h, raw_y2 + 15)
 
         car_crop = img[y1:y2, x1:x2]
         if car_crop.size == 0:
@@ -113,25 +113,29 @@ def analyse():
 
         crop_h, crop_w = car_crop.shape[:2]
 
-        # ===========================
+        # ===============================================
         # MASQUE CARROSSERIE
-        # Exclure vitres / roues / fond
-        # ===========================
+        # Exclure vitres / roues / fond / ciel
+        # ===============================================
         hsv_full = cv2.cvtColor(car_crop, cv2.COLOR_BGR2HSV)
 
-        # Trop sombre = vitres, pneus, joints
+        # Trop sombre → vitres, pneus, joints (V < 45)
         mask_dark = cv2.inRange(hsv_full, (0, 0, 0), (180, 255, 45))
 
-        # Blanc pur = ciel / fond
+        # Blanc pur désaturé → ciel / fond (S < 18, V > 210)
         mask_sky = cv2.inRange(hsv_full, (0, 0, 210), (180, 18, 255))
 
-        # Masque final = carrosserie uniquement
+        # Carrosserie = tout sauf dark + sky
         mask_body = cv2.bitwise_not(cv2.bitwise_or(mask_dark, mask_sky))
 
-        # ===========================
-        # ÉTAPE 1 : MOYENNE GLOBALE
-        # sur toute la carrosserie
-        # ===========================
+        # Morphologie : boucher les petits trous dans le masque
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        mask_body = cv2.morphologyEx(mask_body, cv2.MORPH_CLOSE, kernel)
+
+        # ===============================================
+        # ÉTAPE 1 : MOYENNE GLOBALE CARROSSERIE
+        # sur toute la voiture (roue à roue)
+        # ===============================================
         all_valid = hsv_full[mask_body > 0]
         if len(all_valid) < 100:
             return jsonify({"error": "No body pixels found"}), 400
@@ -142,50 +146,62 @@ def analyse():
             float(np.median(all_valid[:, 2]))
         ])
 
-        # ===========================
-        # ÉTAPE 2 : DÉCOUPAGE EN 3 ZONES
+        # ===============================================
+        # ÉTAPE 2 : 3 ZONES HORIZONTALES
         #
-        #  |-- 20% --|-- 40% --|-- 40% --|
-        #  aile avant  portes   aile+porte arrière
+        # On définit la bande carrosserie verticalement :
+        # - haut  : on ignore le toit (15% haut)
+        # - bas   : on ignore les roues (80% bas)
         #
-        # On adapte selon largeur du crop
-        # ===========================
+        # Horizontalement : 3 zones égales sur la largeur
+        # pour s'adapter à n'importe quelle voiture
+        #
+        #  |--- 33% ---|--- 34% ---|--- 33% ---|
+        #  aile avant    portes     aile arrière
+        # ===============================================
 
-        # Limites verticales : on ignore le bas (roues) et le haut (toit/ciel)
-        # On prend la bande centrale = carrosserie principale
-        zone_y1 = int(crop_h * 0.10)   # 10% depuis le haut
-        zone_y2 = int(crop_h * 0.85)   # jusqu'à 85% (avant les roues)
+        band_y1 = int(crop_h * 0.15)
+        band_y2 = int(crop_h * 0.80)
 
-        # Limites horizontales des 3 zones
-        cut1 = int(crop_w * 0.22)   # fin aile avant
-        cut2 = int(crop_w * 0.62)   # fin portes / début aile arrière
+        cut1 = int(crop_w * 0.33)
+        cut2 = int(crop_w * 0.67)
 
         zones = [
             {
-                "name":  "Aile avant",
-                "xA": 0,    "xB": cut1,
-                "yA": zone_y1, "yB": zone_y2
+                "name": "Aile avant",
+                "xA": 0,     "xB": cut1,
+                "yA": band_y1, "yB": band_y2
             },
             {
-                "name":  "Portes",
-                "xA": cut1, "xB": cut2,
-                "yA": zone_y1, "yB": zone_y2
+                "name": "Portes",
+                "xA": cut1,  "xB": cut2,
+                "yA": band_y1, "yB": band_y2
             },
             {
-                "name":  "Aile / Porte arrière",
-                "xA": cut2, "xB": crop_w,
-                "yA": zone_y1, "yB": zone_y2
+                "name": "Aile arriere",
+                "xA": cut2,  "xB": crop_w,
+                "yA": band_y1, "yB": band_y2
             },
         ]
 
-        # ===========================
-        # ÉTAPE 3 : COMPARER CHAQUE
-        # ZONE À LA MOYENNE GLOBALE
-        # ===========================
+        # ===============================================
+        # ÉTAPE 3 : COMPARER CHAQUE ZONE
+        # à la moyenne globale
+        # ===============================================
         final_img = img.copy()
 
-        # Dessiner contour total de la voiture (blanc fin)
+        # Contour total voiture (blanc fin)
         cv2.rectangle(final_img, (x1, y1), (x2, y2), (220, 220, 220), 1)
+
+        # Ligne de séparation des zones (pointillés blancs)
+        for cut in [cut1, cut2]:
+            for dy in range(band_y1, band_y2, 12):
+                cv2.line(
+                    final_img,
+                    (x1 + cut, y1 + dy),
+                    (x1 + cut, y1 + dy + 6),
+                    (255, 255, 255), 1
+                )
 
         results_zones = []
         detected = 0
@@ -194,101 +210,114 @@ def analyse():
             xA, xB = zone["xA"], zone["xB"]
             yA, yB = zone["yA"], zone["yB"]
 
-            zone_color = get_zone_color(hsv_full, mask_body, xA, yA, xB, yB)
+            zone_color, px_count = get_zone_color(
+                hsv_full, mask_body, xA, yA, xB, yB
+            )
 
-            # Coordonnées absolues sur l'image finale
             abs_x1 = x1 + xA
             abs_y1 = y1 + yA
             abs_x2 = x1 + xB
             abs_y2 = y1 + yB
 
             if zone_color is None:
-                # Pas assez de pixels valides
                 color_rect  = (150, 150, 150)
                 label_score = "N/A"
-                diff        = 0
+                diff        = 0.0
                 verdict     = "Non analysable"
             else:
                 diff = float(np.linalg.norm(zone_color - ref_color))
 
-                # Seuils de différence par rapport à la moyenne globale
-                if diff < 12:
-                    color_rect = (0, 200, 0)       # vert  = OK
+                if diff < 10:
+                    color_rect = (0, 210, 0)       # vert  — OK
                     verdict    = "OK"
-                elif diff < 30:
-                    color_rect = (0, 165, 255)     # orange = légère variation
-                    verdict    = "Légère variation"
+                elif diff < 28:
+                    color_rect = (0, 165, 255)     # orange — légère variation
+                    verdict    = "Legere variation"
                     detected  += 1
                 else:
-                    color_rect = (0, 0, 255)       # rouge = suspect
-                    verdict    = "Suspect — vérifier"
+                    color_rect = (0, 0, 255)       # rouge — suspect
+                    verdict    = "SUSPECT - verifier"
                     detected  += 1
 
                 label_score = str(int(diff))
 
-            # Grand rectangle de zone
+            # --- Grand rectangle zone ---
             cv2.rectangle(
                 final_img,
                 (abs_x1, abs_y1),
                 (abs_x2, abs_y2),
                 color_rect,
-                4               # trait épais = bien visible
+                5
             )
 
-            # Fond semi-transparent pour le texte
-            text_bg_y1 = abs_y1
-            text_bg_y2 = abs_y1 + 48
+            # --- Fond noir semi-transparent pour lisibilité texte ---
             overlay = final_img.copy()
-            cv2.rectangle(overlay, (abs_x1, text_bg_y1),
-                          (abs_x2, text_bg_y2), (0, 0, 0), -1)
-            cv2.addWeighted(overlay, 0.45, final_img, 0.55, 0, final_img)
+            cv2.rectangle(
+                overlay,
+                (abs_x1,     abs_y1),
+                (abs_x2,     abs_y1 + 52),
+                (0, 0, 0), -1
+            )
+            cv2.addWeighted(overlay, 0.5, final_img, 0.5, 0, final_img)
 
-            # Nom de la zone
+            # --- Nom de la zone ---
             cv2.putText(
                 final_img,
                 zone["name"],
-                (abs_x1 + 8, abs_y1 + 18),
+                (abs_x1 + 8, abs_y1 + 20),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.55,
+                0.6,
                 (255, 255, 255),
-                1
+                2
             )
 
-            # Score + verdict
+            # --- Écart + verdict ---
             cv2.putText(
                 final_img,
-                f"Ecart: {label_score}  {verdict}",
-                (abs_x1 + 8, abs_y1 + 38),
+                f"Ecart: {label_score}",
+                (abs_x1 + 8, abs_y1 + 40),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.45,
+                0.5,
                 color_rect,
-                1
+                2
+            )
+
+            # --- Verdict en bas du rectangle ---
+            cv2.putText(
+                final_img,
+                verdict,
+                (abs_x1 + 8, abs_y2 - 10),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.55,
+                color_rect,
+                2
             )
 
             results_zones.append({
-                "zone":    zone["name"],
-                "diff":    round(diff, 1),
-                "verdict": verdict
+                "zone":      zone["name"],
+                "diff":      round(diff, 1),
+                "pixels":    px_count,
+                "verdict":   verdict
             })
 
-        # ===========================
+        # ===============================================
         # SCORE GLOBAL
-        # ===========================
+        # ===============================================
         diffs = [z["diff"] for z in results_zones if z["diff"] > 0]
         final_score = int(np.mean(diffs)) if diffs else 0
         final_score = min(final_score, 100)
 
-        if final_score < 12:
-            result = "Peinture homogène (OK)"
-        elif final_score < 30:
-            result = "Légères variations détectées"
+        if final_score < 10:
+            result = "Peinture homogene (OK)"
+        elif final_score < 28:
+            result = "Legeres variations detectees"
         else:
-            result = "Différence importante — repeinture probable"
+            result = "Difference importante — repeinture probable"
 
-        # Afficher référence globale en bas de l'image
+        # Teinte de référence en bas de l'image
         cv2.putText(
             final_img,
-            f"Teinte de reference (H={int(ref_color[0])} S={int(ref_color[1])} V={int(ref_color[2])})",
+            f"Ref globale : H={int(ref_color[0])}  S={int(ref_color[1])}  V={int(ref_color[2])}",
             (10, img_h - 10),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.45,
@@ -306,7 +335,7 @@ def analyse():
             "result":         result,
             "zones":          results_zones,
             "zones_detected": detected,
-            "reference_hsv":  {
+            "reference_hsv": {
                 "H": round(ref_color[0], 1),
                 "S": round(ref_color[1], 1),
                 "V": round(ref_color[2], 1)
