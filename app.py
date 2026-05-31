@@ -184,7 +184,7 @@ def analyse():
         mean_score = np.mean(zones_scores)
         max_score = np.max(zones_scores)
 
-        final_score = int(sum(zones_scores.values()) / len(zones_scores))
+        final_score = int(np.mean(zones_scores))
         final_score = min(final_score, 100)
 
         if final_score < 20:
@@ -210,16 +210,17 @@ def analyse():
 
         cv2.imwrite(analysed_path, final_img)
             
-       return jsonify({
-           "yolo": yolo_result,
-           "score": final_score,
-           "result": result,
-           "zones_scores": zones_scores,
-           "zones_detected": detected,
 
-           "image_result": analysed_name,   # <- obligatoire pour PHP
-           "image_url": request.host_url + "uploads/" + analysed_name
-        }))
+
+        return jsonify({
+            "yolo": yolo_result,
+            "score": final_score,
+            "result": result,
+            "zones_scores": zones_scores,
+            "zones_detected": detected,
+            "image_result": analysed_name,
+            "image_url": request.host_url + "uploads/" + analysed_name
+        })
 
     except Exception as e:
         return jsonify({
