@@ -94,15 +94,22 @@ def analyse():
         # =========================
         # 🔥 FIX IMPORTANT : PADDING
         # =========================
-        pad_x = int((x2 - x1) * 0.20)
-        pad_y = int((y2 - y1) * 0.20)
-
+      
+        pad_x = int((x2 - x1) * 0.10)
+        pad_y = int((y2 - y1) * 0.10)
         x1 = max(0, x1 - pad_x)
         y1 = max(0, y1 - pad_y)
         x2 = min(w_img, x2 + pad_x)
         y2 = min(h_img, y2 + pad_y)
 
         car_crop = img[y1:y2, x1:x2]
+
+        h, w = car_crop.shape[:2]
+
+        top_cut = int(h * 0.15)     # ciel
+        bottom_cut = int(h * 0.10)  # sol
+
+        car_crop = car_crop[top_cut:h-bottom_cut, :]
 
         if car_crop.size == 0:
             return jsonify({"error": "invalid crop"}), 400
@@ -121,7 +128,7 @@ def analyse():
         # =========================
         # GRID 3x3
         # =========================
-        rows, cols = 3, 3
+        rows, cols = 6, 10
         h, w, _ = car_crop.shape
 
         cell_h = h // rows
