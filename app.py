@@ -98,7 +98,7 @@ def analyse():
 
         h_img, w_img = gray.shape
 
-        pad = 1
+        pad = 0
 
         x1 = max(0, x1 + pad)
         y1 = max(0, y1 + pad)
