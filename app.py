@@ -152,7 +152,7 @@ def analyse():
         detected = 0
         total_score = 0
 
-        for name, (xA, xB) in zones.items():
+      for name, (xA, xB) in zones.items():
 
     zone = car_gray[:, xA:xB]
     s = score_zone(zone)
@@ -188,7 +188,6 @@ def analyse():
             color_rect,
             2
         )
-
         # =========================
         # FINAL SCORE
         # =========================
