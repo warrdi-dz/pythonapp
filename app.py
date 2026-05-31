@@ -4,39 +4,63 @@ import numpy as np
 import os
 import time
 import traceback
+import requests
 from werkzeug.utils import secure_filename
-from ultralytics import YOLO
 
-
-model = YOLO("yolov8n.pt")
 app = Flask(__name__)
 
 UPLOAD_FOLDER = "uploads"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
+# =========================
+# YOLO API CALL (REMOTE)
+# =========================
+def call_yolo(image_path):
 
+    url = "https://warrdi.com/pytho/detect"
+
+    try:
+        with open(image_path, "rb") as f:
+            files = {"image": f}
+            r = requests.post(url, files=files, timeout=15)
+
+        if r.status_code == 200:
+            return r.json()
+
+        return {"error": "YOLO failed", "status": r.status_code}
+
+    except Exception as e:
+        return {"error": "YOLO exception", "details": str(e)}
+
+
+# =========================
+# UPLOAD ROUTE
+# =========================
 @app.route("/uploads/<filename>")
 def uploads(filename):
     return send_from_directory(UPLOAD_FOLDER, filename)
 
 
+# =========================
+# HOME
+# =========================
 @app.route("/")
 def home():
-    return jsonify({"status": "OK"})
+    return jsonify({
+        "status": "OK",
+        "message": "WARRDI SCAN API"
+    })
 
 
+# =========================
+# MAIN ANALYSE
+# =========================
 @app.route("/analyse", methods=["POST"])
 def analyse():
 
     try:
 
-        global model
-
-        if model is None:
-            model = YOLO("yolov8n.pt")
-
-
-        
+        # CHECK IMAGE
         if 'image' not in request.files:
             return jsonify({"error": "no image"}), 400
 
@@ -47,39 +71,25 @@ def analyse():
 
         file.save(path)
 
+        # =========================
+        # YOLO CALL (REMOTE SERVER)
+        # =========================
+        yolo_result = call_yolo(path)
+
+        # =========================
+        # LOAD IMAGE
+        # =========================
         img = cv2.imread(path)
 
-        # =========================
-        # YOLO DETECTION VEHICULE
-        # =========================
-        results = model(img)
+        if img is None:
+            return jsonify({"error": "image not readable"}), 400
 
-        car_found = False
-
-        for r in results:
-            for box in r.boxes:
-
-                cls = int(box.cls[0])
-
-                if cls == 2:  # car
-                    x1, y1, x2, y2 = map(int, box.xyxy[0])
-                    img = img[y1:y2, x1:x2]
-                    car_found = True
-                    break
-
-            if car_found:
-                break
-
-        if not car_found:
-            return jsonify({"error": "vehicle not detected"}), 400
-
-        # =========================
-        # PREPROCESS
-        # =========================
-        
-        img = cv2.resize(img, (640, 360))
+        img = cv2.resize(img, (900, 500))
         original = img.copy()
 
+        # =========================
+        # REFLECTION REMOVAL
+        # =========================
         hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
 
         mask_reflet = cv2.inRange(
@@ -93,31 +103,62 @@ def analyse():
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         blur = cv2.GaussianBlur(gray, (5, 5), 0)
 
-        edges = cv2.Canny(blur, 70, 140)
+        # =========================
+        # CAR DETECTION VIA YOLO (BEST METHOD)
+        # =========================
+        car = None
 
-        contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        try:
+            cars = [
+                d for d in yolo_result.get("detections", [])
+                if d["class"] == 2
+            ]
 
-        if len(contours) == 0:
-            return jsonify({"error": "no vehicle detected"}), 400
+            if cars:
+                x1, y1, x2, y2 = cars[0]["box"]
 
-        car_contour = max(contours, key=cv2.contourArea)
+                car = gray[y1:y2, x1:x2]
 
-        x, y, w, h = cv2.boundingRect(car_contour)
-        car = gray[y:y+h, x:x+w]
+        except:
+            car = None
+
+        # FALLBACK IF YOLO FAIL
+        if car is None or car.size == 0:
+
+            edges = cv2.Canny(blur, 70, 140)
+            contours, _ = cv2.findContours(
+                edges,
+                cv2.RETR_EXTERNAL,
+                cv2.CHAIN_APPROX_SIMPLE
+            )
+
+            if len(contours) == 0:
+                return jsonify({"error": "no vehicle detected"}), 400
+
+            car_contour = max(contours, key=cv2.contourArea)
+            x, y, w, h = cv2.boundingRect(car_contour)
+
+            car = gray[y:y+h, x:x+w]
 
         car = cv2.resize(car, (600, 300))
 
         # =========================
-        # SPLIT ZONES
+        # DIVISION ZONES
         # =========================
-        parts = np.array_split(car, 6, axis=1)
+        left = car[:, :200]
+        center = car[:, 200:400]
+        right = car[:, 400:]
 
         heatmap = np.zeros_like(car)
 
         score = 0
         zones = 0
 
+        # =========================
+        # ANALYSE ZONE FUNCTION
+        # =========================
         def analyse_zone(zone, x_offset):
+
             nonlocal score, zones
 
             brightness = np.mean(zone)
@@ -144,26 +185,64 @@ def analyse():
 
                 h, w = zone.shape
 
-                cv2.rectangle(original, (x_offset, 0), (x_offset + w, h), (0, 0, 255), 2)
-                cv2.rectangle(heatmap, (x_offset, 0), (x_offset + w, h), 255, -1)
+                cv2.rectangle(
+                    original,
+                    (x_offset, 0),
+                    (x_offset + w, h),
+                    (0, 0, 255),
+                    2
+                )
+
+                cv2.rectangle(
+                    heatmap,
+                    (x_offset, 0),
+                    (x_offset + w, h),
+                    255,
+                    -1
+                )
 
         # =========================
-        # LOOP PROPRE
+        # APPLY ANALYSIS
         # =========================
-        x_offset = 0
+        analyse_zone(left, 0)
+        analyse_zone(center, 200)
+        analyse_zone(right, 400)
 
-        for zone in parts:
-            analyse_zone(zone, x_offset)
-            x_offset += zone.shape[1]
+        # =========================
+        # SYMMETRY CHECK
+        # =========================
+        left_mean = np.mean(left)
+        right_mean = np.mean(right)
+
+        symmetry_diff = abs(left_mean - right_mean)
+
+        if symmetry_diff > 25:
+            score += 20
+            cv2.putText(
+                original,
+                "ASYMMETRIE PEINTURE",
+                (20, 30),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                (0, 0, 255),
+                2
+            )
 
         # =========================
         # HEATMAP
         # =========================
         heat_color = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)
-        heat_color = cv2.resize(heat_color, (original.shape[1], original.shape[0]))
+
+        heat_color = cv2.resize(
+            heat_color,
+            (original.shape[1], original.shape[0])
+        )
 
         final = cv2.addWeighted(original, 0.85, heat_color, 0.35, 0)
 
+        # =========================
+        # FINAL SCORE
+        # =========================
         score = int(min(score, 100))
 
         if score < 20:
@@ -175,20 +254,28 @@ def analyse():
         else:
             result = "Forte suspicion de carrosserie repeinte"
 
+        # =========================
+        # SAVE RESULT
+        # =========================
         analysed_name = "analysed_" + filename
         analysed_path = os.path.join(UPLOAD_FOLDER, analysed_name)
 
         cv2.imwrite(analysed_path, final)
 
         return jsonify({
+            "yolo": yolo_result,
             "score": score,
             "result": result,
             "zones_detected": zones,
+            "symmetry_diff": float(symmetry_diff),
             "image_result": analysed_name,
             "image_url": request.host_url + "uploads/" + analysed_name
         })
 
     except Exception as e:
+
+        print(traceback.format_exc())
+
         return jsonify({
             "error": str(e),
             "trace": traceback.format_exc()
