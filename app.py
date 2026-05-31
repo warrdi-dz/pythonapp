@@ -76,7 +76,7 @@ def analyse():
         if img is None:
             return jsonify({"error": "image unreadable"}), 400
 
-        img = cv2.resize(img, (400, 250))
+        img = cv2.resize(img, (900, 500))
 
         detections = yolo_result.get("detections", [])
 
