@@ -54,22 +54,20 @@ def home():
 # =========================
 # ANALYSE
 # =========================
+# =========================
+# ANALYSE INTELLIGENTE
+# =========================
 @app.route("/analyse", methods=["POST"])
 def analyse():
-
     try:
         if "image" not in request.files:
             return jsonify({"error": "no image"}), 400
 
         file = request.files["image"]
-
         filename = str(int(time.time())) + "_" + secure_filename(file.filename)
         path = os.path.join(UPLOAD_FOLDER, filename)
         file.save(path)
 
-        # =========================
-        # YOLO
-        # =========================
         yolo_result = call_yolo(path)
 
         img = cv2.imread(path)
@@ -80,128 +78,173 @@ def analyse():
         img_h, img_w = img.shape[:2]
 
         detections = yolo_result.get("detections", [])
-
-        # --- Toutes les détections voiture (class 2) ---
         cars = [d for d in detections if d.get("class") == 2]
-
         if not cars:
             return jsonify({"error": "Car not detected"}), 400
 
-        # =========================
-        # FUSION DE TOUTES LES
-        # BOUNDING BOXES VOITURE
-        # =========================
+        # === BOUNDING BOX FUSIONNÉE + PADDING ===
         PADDING = 25
-
         x1 = max(0,     min(d["box"][0] for d in cars) - PADDING)
         y1 = max(0,     min(d["box"][1] for d in cars) - PADDING)
         x2 = min(img_w, max(d["box"][2] for d in cars) + PADDING)
         y2 = min(img_h, max(d["box"][3] for d in cars) + PADDING)
 
-        # Si la voiture touche les bords, on force jusqu'au bord
-        if (img_w - x2) < 60:
-            x2 = img_w
-        if (img_h - y2) < 60:
-            y2 = img_h
-        if x1 < 60:
-            x1 = 0
-        if y1 < 60:
-            y1 = 0
+        if (img_w - x2) < 60: x2 = img_w
+        if (img_h - y2) < 60: y2 = img_h
+        if x1 < 60: x1 = 0
+        if y1 < 60: y1 = 0
 
         car_crop = img[y1:y2, x1:x2]
-
         if car_crop.size == 0:
             return jsonify({"error": "invalid crop"}), 400
 
-        # =========================
-        # HSV GLOBAL
-        # =========================
-        car_hsv = cv2.cvtColor(car_crop, cv2.COLOR_BGR2HSV)
+        crop_h, crop_w = car_crop.shape[:2]
 
-        global_color = np.array([
-            np.median(car_hsv[:, :, 0]),
-            np.median(car_hsv[:, :, 1]),
-            np.median(car_hsv[:, :, 2])
-        ])
+        # =============================================
+        # MASQUE : EXCLURE VITRES / ROUES / FOND
+        # On travaille uniquement sur la carrosserie
+        # =============================================
+        hsv_full = cv2.cvtColor(car_crop, cv2.COLOR_BGR2HSV)
 
-        # =========================
-        # GRILLE 4x6 (plus fine)
-        # =========================
-        rows, cols = 4, 6
-        h, w, _ = car_crop.shape
+        # Masque 1 : exclure les zones très sombres (vitres, pneus, joints)
+        # V < 40 = trop sombre = pas de la carrosserie
+        mask_dark = cv2.inRange(hsv_full, (0, 0, 0), (180, 255, 50))
 
-        cell_h = h // rows
-        cell_w = w // cols
+        # Masque 2 : exclure les zones très désaturées ET sombres (ciel, fond)
+        # S < 15 ET V > 200 = blanc pur = ciel/fond
+        mask_sky = cv2.inRange(hsv_full, (0, 0, 200), (180, 15, 255))
 
+        # Masque final carrosserie = tout sauf vitres/roues/fond
+        mask_body = cv2.bitwise_not(cv2.bitwise_or(mask_dark, mask_sky))
+
+        # Appliquer le masque : zones exclues = noir
+        car_body = car_crop.copy()
+        car_body[mask_body == 0] = 0
+
+        # =============================================
+        # GRILLE 6x8 FINE SUR LA ZONE CARROSSERIE
+        # =============================================
+        rows, cols = 6, 8
+        cell_h = crop_h // rows
+        cell_w = crop_w // cols
+
+        # Calculer la couleur HSV médiane de chaque cellule
+        # (uniquement pixels valides = carrosserie)
+        cell_colors = []   # liste de (i, j, h_med, s_med, v_med, pixel_count)
+
+        for i in range(rows):
+            for j in range(cols):
+                yA, yB = i * cell_h, (i + 1) * cell_h
+                xA, xB = j * cell_w, (j + 1) * cell_w
+
+                zone_mask  = mask_body[yA:yB, xA:xB]
+                zone_hsv   = hsv_full[yA:yB, xA:xB]
+
+                # Pixels valides uniquement
+                valid_pixels = zone_hsv[zone_mask > 0]
+
+                if len(valid_pixels) < 50:
+                    # Moins de 50 pixels valides = zone vitres/roues, on ignore
+                    cell_colors.append((i, j, None, None, None, 0))
+                    continue
+
+                h_med = float(np.median(valid_pixels[:, 0]))
+                s_med = float(np.median(valid_pixels[:, 1]))
+                v_med = float(np.median(valid_pixels[:, 2]))
+
+                cell_colors.append((i, j, h_med, s_med, v_med, len(valid_pixels)))
+
+        # =============================================
+        # RÉFÉRENCE : médiane de TOUTES les cellules
+        # valides (carrosserie propre)
+        # =============================================
+        valid_cells = [(c[2], c[3], c[4]) for c in cell_colors if c[2] is not None]
+
+        if not valid_cells:
+            return jsonify({"error": "No body pixels found"}), 400
+
+        ref_h = float(np.median([c[0] for c in valid_cells]))
+        ref_s = float(np.median([c[1] for c in valid_cells]))
+        ref_v = float(np.median([c[2] for c in valid_cells]))
+        ref_color = np.array([ref_h, ref_s, ref_v])
+
+        # =============================================
+        # DESSIN : colorier chaque cellule selon
+        # son écart à la référence carrosserie
+        # =============================================
         final_img = img.copy()
 
-        # Dessiner le contour de la zone analysée
-        cv2.rectangle(
-            final_img,
-            (x1, y1),
-            (x2, y2),
-            (255, 165, 0),   # orange
-            2
-        )
+        # Contour zone analysée (orange)
+        cv2.rectangle(final_img, (x1, y1), (x2, y2), (0, 140, 255), 2)
 
         zones_scores = []
         detected = 0
 
-        for i in range(rows):
-            for j in range(cols):
+        for (i, j, h_med, s_med, v_med, count) in cell_colors:
 
-                yA, yB = i * cell_h, (i + 1) * cell_h
-                xA, xB = j * cell_w, (j + 1) * cell_w
+            yA, yB = i * cell_h, (i + 1) * cell_h
+            xA, xB = j * cell_w, (j + 1) * cell_w
 
-                zone = car_crop[yA:yB, xA:xB]
-                if zone.size == 0:
-                    continue
+            abs_x1 = x1 + xA
+            abs_y1 = y1 + yA
+            abs_x2 = x1 + xB
+            abs_y2 = y1 + yB
 
-                zone_hsv = cv2.cvtColor(zone, cv2.COLOR_BGR2HSV)
+            if h_med is None:
+                # Zone exclue (vitres/roues) — contour gris fin
+                cv2.rectangle(final_img, (abs_x1, abs_y1), (abs_x2, abs_y2),
+                              (100, 100, 100), 1)
+                continue
 
-                zone_color = np.array([
-                    np.median(zone_hsv[:, :, 0]),
-                    np.median(zone_hsv[:, :, 1]),
-                    np.median(zone_hsv[:, :, 2])
-                ])
+            cell_color = np.array([h_med, s_med, v_med])
+            diff = np.linalg.norm(cell_color - ref_color)
+            zones_scores.append(diff)
 
-                diff = np.linalg.norm(zone_color - global_color)
-                zones_scores.append(diff)
+            # Seuils affinés
+            if diff < 15:
+                # OK — pas de rectangle
+                pass
+            elif diff < 30:
+                # Légère variation — vert
+                cv2.rectangle(final_img, (abs_x1, abs_y1), (abs_x2, abs_y2),
+                              (0, 255, 0), 2)
+                detected += 1
+            elif diff < 55:
+                # Zone suspecte — orange
+                cv2.rectangle(final_img, (abs_x1, abs_y1), (abs_x2, abs_y2),
+                              (0, 165, 255), 3)
+                detected += 1
+            else:
+                # Forte différence — rouge épais
+                cv2.rectangle(final_img, (abs_x1, abs_y1), (abs_x2, abs_y2),
+                              (0, 0, 255), 3)
+                detected += 1
 
-                abs_x1 = x1 + xA
-                abs_y1 = y1 + yA
-                abs_x2 = x1 + xB
-                abs_y2 = y1 + yB
-
-                if diff > 20:
-                    # Vert = légère variation, Rouge = forte différence
-                    color     = (0, 255, 0) if diff < 45 else (0, 0, 255)
-                    thickness = 2           if diff < 45 else 3
-
-                    cv2.rectangle(
-                        final_img,
-                        (abs_x1, abs_y1),
-                        (abs_x2, abs_y2),
-                        color,
-                        thickness
-                    )
-                    detected += 1
+            # Score affiché dans la cellule
+            cv2.putText(
+                final_img,
+                str(int(diff)),
+                (abs_x1 + 4, abs_y1 + 14),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.35,
+                (255, 255, 255),
+                1
+            )
 
         final_score = int(np.mean(zones_scores)) if zones_scores else 0
         final_score = min(final_score, 100)
 
-        if final_score < 20:
+        if final_score < 15:
             result = "Peinture homogène (OK)"
-        elif final_score < 40:
+        elif final_score < 30:
             result = "Légères variations"
-        elif final_score < 60:
-            result = "Zones suspectes"
+        elif final_score < 55:
+            result = "Zones suspectes — vérifier"
         else:
-            result = "Différence importante"
+            result = "Différence importante — repeinture probable"
 
         analysed_name = "analysed_" + filename
         analysed_path = os.path.join(UPLOAD_FOLDER, analysed_name)
-
         cv2.imwrite(analysed_path, final_img)
 
         return jsonify({
@@ -217,11 +260,4 @@ def analyse():
         return jsonify({
             "error": str(e),
             "trace": traceback.format_exc()
-        }), 500
-
-
-# =========================
-# RUN SERVER
-# =========================
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+        }), 500 port=5000)
