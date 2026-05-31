@@ -13,10 +13,9 @@ UPLOAD_FOLDER = "uploads"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
 # =========================
-# YOLO API CALL (REMOTE)
+# YOLO API CALL
 # =========================
 def call_yolo(image_path):
-
     url = "https://warrdi.com/pytho/detect"
 
     try:
@@ -48,10 +47,13 @@ def uploads(filename):
 def home():
     return jsonify({
         "status": "OK",
-        "message": "WARRDI SCAN API + YOLO"
+        "message": "GARAGE PRO V4 API"
     })
 
 
+# =========================
+# ANALYSE
+# =========================
 @app.route("/analyse", methods=["POST"])
 def analyse():
 
@@ -65,6 +67,9 @@ def analyse():
         path = os.path.join(UPLOAD_FOLDER, filename)
         file.save(path)
 
+        # =========================
+        # YOLO
+        # =========================
         yolo_result = call_yolo(path)
 
         img = cv2.imread(path)
@@ -72,7 +77,6 @@ def analyse():
             return jsonify({"error": "image unreadable"}), 400
 
         img = cv2.resize(img, (900, 500))
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
         detections = yolo_result.get("detections", [])
 
@@ -87,83 +91,87 @@ def analyse():
 
         x1, y1, x2, y2 = cars[0]["box"]
 
-        h_img, w_img = gray.shape
+        x1, y1 = max(0, x1), max(0, y1)
+        x2, y2 = max(0, x2), max(0, y2)
 
-        x1 = max(0, min(x1, w_img - 1))
-        x2 = max(0, min(x2, w_img - 1))
-        y1 = max(0, min(y1, h_img - 1))
-        y2 = max(0, min(y2, h_img - 1))
+        car_crop = img[y1:y2, x1:x2]
 
-        car_gray = cv2.resize(gray[y1:y2, x1:x2], (600, 300))
-        car_color = cv2.resize(img[y1:y2, x1:x2], (600, 300))
+        if car_crop.size == 0:
+            return jsonify({"error": "invalid crop"}), 400
 
-        heatmap = np.zeros((300, 600), dtype=np.uint8)
+        # =========================
+        # HSV GLOBAL
+        # =========================
+        car_hsv = cv2.cvtColor(car_crop, cv2.COLOR_BGR2HSV)
 
-        def score_zone(zone):
-            brightness = np.mean(zone)
-            texture = cv2.Laplacian(zone, cv2.CV_64F).var()
-            color_var = np.std(zone)
+        global_color = np.array([
+            np.median(car_hsv[:, :, 0]),
+            np.median(car_hsv[:, :, 1]),
+            np.median(car_hsv[:, :, 2])
+        ])
 
-            score = 0
-            if texture < 60:
-                score += 40
-            if texture > 250:
-                score += 25
-            if brightness > 175 or brightness < 65:
-                score += 30
-            if 80 < brightness < 120 and texture < 90:
-                score += 35
-            if color_var > 12:
-                score += 30
+        # =========================
+        # GRID 3x3
+        # =========================
+        rows, cols = 3, 3
+        h, w, _ = car_crop.shape
 
-            return score
+        cell_h = h // rows
+        cell_w = w // cols
 
-        zones = {
-            "gauche": (0, 200),
-            "centre": (200, 400),
-            "droite": (400, 600)
-        }
+        final_img = img.copy()
 
-        zones_scores = {}
+        zones_scores = []
         detected = 0
 
-        for name, (xA, xB) in zones.items():
+        for i in range(rows):
+            for j in range(cols):
 
-            zone = car_gray[:, xA:xB]
-            s = score_zone(zone)
-            zones_scores[name] = int(s)
+                yA, yB = i * cell_h, (i + 1) * cell_h
+                xA, xB = j * cell_w, (j + 1) * cell_w
 
-            if s >= 50:
-                detected += 1
+                zone = car_crop[yA:yB, xA:xB]
+                if zone.size == 0:
+                    continue
 
-            if s >= 70:
-                heat_value = 255
-                color_rect = (0, 0, 255)
-            elif s >= 50:
-                heat_value = 160
-                color_rect = (0, 165, 255)
-            else:
-                heat_value = 0
-                color_rect = None
+                zone_hsv = cv2.cvtColor(zone, cv2.COLOR_BGR2HSV)
 
-            heatmap[:, xA:xB] = heat_value
+                zone_color = np.array([
+                    np.median(zone_hsv[:, :, 0]),
+                    np.median(zone_hsv[:, :, 1]),
+                    np.median(zone_hsv[:, :, 2])
+                ])
 
-            if color_rect:
-                cv2.rectangle(car_color, (xA, 0), (xB, 300), color_rect, 2)
+                diff = np.linalg.norm(zone_color - global_color)
+                zones_scores.append(diff)
 
-        final_score = int(np.mean(list(zones_scores.values())))
+                abs_x1, abs_y1 = x1 + xA, y1 + yA
+                abs_x2, abs_y2 = x1 + xB, y1 + yB
+
+                if diff > 20:
+                    color = (0, 255, 0) if diff < 45 else (0, 0, 255)
+                    thickness = 2 if diff < 45 else 3
+
+                    cv2.rectangle(
+                        final_img,
+                        (abs_x1, abs_y1),
+                        (abs_x2, abs_y2),
+                        color,
+                        thickness
+                    )
+                    detected += 1
+
+        final_score = int(np.mean(zones_scores)) if zones_scores else 0
+        final_score = min(final_score, 100)
 
         if final_score < 20:
-            result = "Peinture d'origine (OK)"
-        elif final_score < 45:
-            result = "Légères retouches"
-        elif final_score < 70:
-            result = "Peinture suspecte"
+            result = "Peinture homogène (OK)"
+        elif final_score < 40:
+            result = "Légères variations"
+        elif final_score < 60:
+            result = "Zones suspectes"
         else:
-            result = "Voiture probablement repeinte"
-
-        heatmap_color = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)
-        final_img = cv2.addWeighted(car_color, 0.7, heatmap_color, 0.3, 0)
+            result = "Différence importante"
 
         analysed_name = "analysed_" + filename
         analysed_path = os.path.join(UPLOAD_FOLDER, analysed_name)
@@ -174,7 +182,6 @@ def analyse():
             "yolo": yolo_result,
             "score": final_score,
             "result": result,
-            "zones_scores": zones_scores,
             "zones_detected": detected,
             "image_result": analysed_name,
             "image_url": request.host_url + "uploads/" + analysed_name
@@ -185,3 +192,10 @@ def analyse():
             "error": str(e),
             "trace": traceback.format_exc()
         }), 500
+
+
+# =========================
+# RUN SERVER
+# =========================
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000)
