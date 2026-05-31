@@ -13,7 +13,7 @@ UPLOAD_FOLDER = "uploads"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
 # =========================
-# YOLO API CALL (REMOTE)
+# YOLO API CALL
 # =========================
 def call_yolo(image_path):
 
@@ -48,10 +48,13 @@ def uploads(filename):
 def home():
     return jsonify({
         "status": "OK",
-        "message": "WARRDI SCAN API + YOLO"
+        "message": "GARAGE PRO V4 API"
     })
 
 
+# =========================
+# ANALYSE
+# =========================
 @app.route("/analyse", methods=["POST"])
 def analyse():
 
@@ -65,6 +68,9 @@ def analyse():
         path = os.path.join(UPLOAD_FOLDER, filename)
         file.save(path)
 
+        # =========================
+        # YOLO
+        # =========================
         yolo_result = call_yolo(path)
 
         img = cv2.imread(path)
@@ -74,6 +80,9 @@ def analyse():
         img = cv2.resize(img, (900, 500))
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
+        # =========================
+        # DETECT CAR
+        # =========================
         detections = yolo_result.get("detections", [])
 
         cars = sorted(
@@ -97,7 +106,21 @@ def analyse():
         car_gray = cv2.resize(gray[y1:y2, x1:x2], (600, 300))
         car_color = cv2.resize(img[y1:y2, x1:x2], (600, 300))
 
-        heatmap = np.zeros((300, 600), dtype=np.uint8)
+        # =========================
+        # GRID HEATMAP
+        # =========================
+        h, w = car_gray.shape
+
+        rows = 4
+        cols = 6
+
+        cell_h = h // rows
+        cell_w = w // cols
+
+        heatmap = np.zeros((h, w), dtype=np.uint8)
+
+        zones_scores = []
+        detected = 0
 
         def score_zone(zone):
             brightness = np.mean(zone)
@@ -105,6 +128,7 @@ def analyse():
             color_var = np.std(zone)
 
             score = 0
+
             if texture < 60:
                 score += 40
             if texture > 250:
@@ -118,40 +142,42 @@ def analyse():
 
             return score
 
-        zones = {
-            "gauche": (0, 200),
-            "centre": (200, 400),
-            "droite": (400, 600)
-        }
+        for i in range(rows):
+            for j in range(cols):
 
-        zones_scores = {}
-        detected = 0
+                yA = i * cell_h
+                yB = (i + 1) * cell_h
+                xA = j * cell_w
+                xB = (j + 1) * cell_w
 
-        for name, (xA, xB) in zones.items():
+                zone = car_gray[yA:yB, xA:xB]
+                s = score_zone(zone)
 
-            zone = car_gray[:, xA:xB]
-            s = score_zone(zone)
-            zones_scores[name] = int(s)
+                zones_scores.append(s)
 
-            if s >= 50:
-                detected += 1
+                # HEAT COLOR
+                if s >= 70:
+                    heatmap[yA:yB, xA:xB] = 255
+                    color = (0, 0, 255)
+                elif s >= 50:
+                    heatmap[yA:yB, xA:xB] = 160
+                    color = (0, 165, 255)
+                else:
+                    color = None
 
-            if s >= 70:
-                heat_value = 255
-                color_rect = (0, 0, 255)
-            elif s >= 50:
-                heat_value = 160
-                color_rect = (0, 165, 255)
-            else:
-                heat_value = 0
-                color_rect = None
+                if color:
+                    cv2.rectangle(car_color, (xA, yA), (xB, yB), color, 1)
 
-            heatmap[:, xA:xB] = heat_value
+                if s >= 50:
+                    detected += 1
 
-            if color_rect:
-                cv2.rectangle(car_color, (xA, 0), (xB, 300), color_rect, 2)
+        # =========================
+        # FINAL SCORE
+        # =========================
+        mean_score = np.mean(zones_scores)
+        max_score = np.max(zones_scores)
 
-        final_score = int(np.mean(list(zones_scores.values())))
+        final_score = int((mean_score * 0.5) + (max_score * 0.5))
 
         if final_score < 20:
             result = "Peinture d'origine (OK)"
@@ -162,9 +188,15 @@ def analyse():
         else:
             result = "Voiture probablement repeinte"
 
+        # =========================
+        # HEATMAP FINAL IMAGE
+        # =========================
         heatmap_color = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)
         final_img = cv2.addWeighted(car_color, 0.7, heatmap_color, 0.3, 0)
 
+        # =========================
+        # SAVE IMAGE
+        # =========================
         analysed_name = "analysed_" + filename
         analysed_path = os.path.join(UPLOAD_FOLDER, analysed_name)
 
@@ -174,9 +206,7 @@ def analyse():
             "yolo": yolo_result,
             "score": final_score,
             "result": result,
-            "zones_scores": zones_scores,
             "zones_detected": detected,
-            "image_result": analysed_name,
             "image_url": request.host_url + "uploads/" + analysed_name
         })
 
@@ -185,3 +215,7 @@ def analyse():
             "error": str(e),
             "trace": traceback.format_exc()
         }), 500
+
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000)
