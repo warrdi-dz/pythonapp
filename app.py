@@ -136,16 +136,23 @@ def analyse():
 
             score = 0
 
+# texture
             if texture < 30:
-              score += 20
+               score += 40
             elif texture < 60:
-              score += 10
+               score += 25
+            elif texture < 100:
+             score += 10
 
-            if brightness < 60 or brightness > 200:
-              score += 15
+          # luminosité
+            if brightness < 70 or brightness > 180:
+             score += 30
 
-            if color_var > 25:
-              score += 20
+# variation
+            if color_var > 15:
+             score += 30
+            elif color_var > 8:
+             score += 15
 
             return score
 
@@ -163,14 +170,14 @@ def analyse():
                 zones_scores.append(s)
 
                 # HEAT COLOR
-                if s >= 70:
-                    heatmap[yA:yB, xA:xB] = 255
-                    color = (0, 0, 255)
-                elif s >= 50:
-                    heatmap[yA:yB, xA:xB] = 160
-                    color = (0, 165, 255)
+                if s >= 60:
+                     heatmap[yA:yB, xA:xB] = 255
+                     color = (0, 0, 255)      # rouge
+                elif s >= 30:
+                     heatmap[yA:yB, xA:xB] = 180
+                     color = (0, 255, 0)      # vert
                 else:
-                    color = None
+                     color = None
 
                 if color:
                     cv2.rectangle(car_color, (xA, yA), (xB, yB), color, 1)
