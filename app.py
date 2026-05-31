@@ -105,84 +105,131 @@ def analyse():
         x2 = max(0, x2 - pad)
         y2 = max(0, y2 - pad)
 
-        # =========================
-        # ANALYSE COULEUR DOMINANTE
-        # =========================
+ # =========================
+# ANALYSE
+# =========================
+@app.route("/analyse", methods=["POST"])
+def analyse():
 
+    try:
+        if "image" not in request.files:
+            return jsonify({"error": "no image"}), 400
+
+        file = request.files["image"]
+
+        filename = str(int(time.time())) + "_" + secure_filename(file.filename)
+        path = os.path.join(UPLOAD_FOLDER, filename)
+        file.save(path)
+
+        # =========================
+        # YOLO
+        # =========================
+        yolo_result = call_yolo(path)
+
+        img = cv2.imread(path)
+        if img is None:
+            return jsonify({"error": "image unreadable"}), 400
+
+        img = cv2.resize(img, (900, 500))
+
+        detections = yolo_result.get("detections", [])
+
+        cars = sorted(
+            [d for d in detections if d.get("class") == 2],
+            key=lambda x: x.get("conf", 0),
+            reverse=True
+        )
+
+        if not cars:
+            return jsonify({"error": "Car not detected"}), 400
+
+        x1, y1, x2, y2 = cars[0]["box"]
+
+        x1 = max(0, x1)
+        y1 = max(0, y1)
+        x2 = max(0, x2)
+        y2 = max(0, y2)
+
+        # =========================
+        # EXTRACTION VOITURE
+        # =========================
         car_crop = img[y1:y2, x1:x2]
 
         if car_crop.size == 0:
             return jsonify({"error": "invalid crop"}), 400
 
+        # =========================
+        # HSV (plus stable couleur)
+        # =========================
+        car_hsv = cv2.cvtColor(car_crop, cv2.COLOR_BGR2HSV)
+
+        h_mean = np.median(car_hsv[:, :, 0])
+        s_mean = np.median(car_hsv[:, :, 1])
+        v_mean = np.median(car_hsv[:, :, 2])
+
+        global_color = np.array([h_mean, s_mean, v_mean])
+
+        # =========================
+        # GRID 3x3 (grandes zones)
+        # =========================
+        rows = 3
+        cols = 3
+
         h, w, _ = car_crop.shape
-
-        rows = 6
-        cols = 8
-
         cell_h = h // rows
         cell_w = w // cols
 
-        global_b = np.mean(car_crop[:, :, 0])
-        global_g = np.mean(car_crop[:, :, 1])
-        global_r = np.mean(car_crop[:, :, 2])
-
-        global_color = np.array([
-            global_b,
-            global_g,
-            global_r
-        ])
+        final_img = img.copy()
 
         zones_scores = []
         detected = 0
 
-        # image originale
-        final_img = img.copy()
-
+        # =========================
+        # ANALYSE ZONES
+        # =========================
         for i in range(rows):
             for j in range(cols):
 
-                local_y1 = i * cell_h
-                local_y2 = (i + 1) * cell_h
+                yA = i * cell_h
+                yB = (i + 1) * cell_h
+                xA = j * cell_w
+                xB = (j + 1) * cell_w
 
-                local_x1 = j * cell_w
-                local_x2 = (j + 1) * cell_w
-
-                zone = car_crop[
-                    local_y1:local_y2,
-                    local_x1:local_x2
-                ]
+                zone = car_crop[yA:yB, xA:xB]
 
                 if zone.size == 0:
                     continue
 
-                mean_b = np.mean(zone[:, :, 0])
-                mean_g = np.mean(zone[:, :, 1])
-                mean_r = np.mean(zone[:, :, 2])
+                zone_hsv = cv2.cvtColor(zone, cv2.COLOR_BGR2HSV)
 
-                zone_color = np.array([
-                    mean_b,
-                    mean_g,
-                    mean_r
-                ])
+                zh = np.median(zone_hsv[:, :, 0])
+                zs = np.median(zone_hsv[:, :, 1])
+                zv = np.median(zone_hsv[:, :, 2])
 
-                diff = np.linalg.norm(
-                    zone_color - global_color
-                )
+                zone_color = np.array([zh, zs, zv])
+
+                # différence couleur
+                diff = np.linalg.norm(zone_color - global_color)
 
                 score = int(diff)
-
                 zones_scores.append(score)
 
-                abs_x1 = x1 + local_x1
-                abs_y1 = y1 + local_y1
-                abs_x2 = x1 + local_x2
-                abs_y2 = y1 + local_y2
+                # coordonnées image originale
+                abs_x1 = x1 + xA
+                abs_y1 = y1 + yA
+                abs_x2 = x1 + xB
+                abs_y2 = y1 + yB
 
-                # zone légèrement différente
-                if diff > 40:
+                # =========================
+                # LOGIQUE D'ALERTE
+                # =========================
 
-                    detected += 1
+                # zone normale
+                if diff < 20:
+                    continue
 
+                # zone suspecte
+                if 20 <= diff < 45:
                     cv2.rectangle(
                         final_img,
                         (abs_x1, abs_y1),
@@ -190,10 +237,10 @@ def analyse():
                         (0, 255, 0),
                         2
                     )
+                    detected += 1
 
                 # zone très différente
-                if diff > 70:
-
+                elif diff >= 45:
                     cv2.rectangle(
                         final_img,
                         (abs_x1, abs_y1),
@@ -201,57 +248,46 @@ def analyse():
                         (0, 0, 255),
                         3
                     )
+                    detected += 1
 
         # =========================
         # SCORE FINAL
         # =========================
-
         if len(zones_scores) == 0:
             final_score = 0
         else:
-            final_score = int(np.max(zones_scores))
+            final_score = int(np.mean(zones_scores))
 
         final_score = min(final_score, 100)
 
         if final_score < 20:
-            result = "Peinture d'origine (OK)"
+            result = "Peinture homogène (OK)"
         elif final_score < 40:
-            result = "Différence légère détectée"
-        elif final_score < 70:
-            result = "Peinture suspecte"
+            result = "Légères variations"
+        elif final_score < 60:
+            result = "Zones suspectes"
         else:
-            result = "Zone fortement différente"
+            result = "Différence importante détectée"
 
         # =========================
         # SAVE IMAGE
         # =========================
-
         analysed_name = "analysed_" + filename
-        analysed_path = os.path.join(
-            UPLOAD_FOLDER,
-            analysed_name
-        )
+        analysed_path = os.path.join(UPLOAD_FOLDER, analysed_name)
 
-        cv2.imwrite(
-            analysed_path,
-            final_img
-        )
+        cv2.imwrite(analysed_path, final_img)
 
         return jsonify({
             "yolo": yolo_result,
             "score": final_score,
             "result": result,
-            "zones_scores": zones_scores,
             "zones_detected": detected,
             "image_result": analysed_name,
             "image_url": request.host_url + "uploads/" + analysed_name
-        }) 
-                                   
-    except Exception as e:
-            return jsonify({
-                "error": str(e),
-                "trace": traceback.format_exc()
-            }), 500
+        })
 
-if __name__ == "__main__":
-     app.run(host="0.0.0.0", port=5000)
+    except Exception as e:
+        return jsonify({
+            "error": str(e),
+            "trace": traceback.format_exc()
+        }), 500
