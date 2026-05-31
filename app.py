@@ -8,7 +8,7 @@ from werkzeug.utils import secure_filename
 from ultralytics import YOLO
 
 
-model = None
+model = YOLO("yolov8n.pt")
 app = Flask(__name__)
 
 UPLOAD_FOLDER = "uploads"
