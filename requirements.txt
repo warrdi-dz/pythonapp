@@ -1,5 +1,6 @@
 flask
+opencv-python-headless
 numpy
-opencv-python
-ultralytics
+requests
+werkzeug
 gunicorn
