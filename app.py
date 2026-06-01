@@ -64,62 +64,187 @@ def get_zone_color(hsv_img, mask, xA, yA, xB, yB):
 
 
 # =========================
-# DÉTECTER SENS VOITURE
-# Retourne "left" si l'avant
-# est à gauche, "right" sinon
+# DÉTECTER RÉTROVISEUR
+# Cherche un petit rectangle
+# sombre saillant sur le côté
+# de la voiture (zone milieu)
 # =========================
-def detect_car_orientation(car_crop, detections, x1_car, y1_car):
+def detect_mirror(car_crop, orientation):
     """
-    Stratégie : chercher les feux avant (blancs/jaunes)
-    vs feux arrière (rouges) dans les bandes gauche/droite.
-    Si on trouve du rouge à gauche → avant est à droite.
-    Si on trouve du rouge à droite → avant est à gauche.
-    Par défaut : compare la saturation rouge des deux côtés.
+    Le rétroviseur est un petit bloc sombre/coloré
+    qui dépasse sur le côté de la voiture,
+    situé entre 25% et 50% de la largeur du crop
+    (côté avant) dans la bande verticale centrale.
+    
+    Retourne (mx1, my1, mx2, my2) en coords crop
+    ou None si non trouvé.
     """
     crop_h, crop_w = car_crop.shape[:2]
 
-    # Bande gauche et droite (20% de la largeur, zone basse = feux)
-    band_w  = int(crop_w * 0.20)
-    band_y1 = int(crop_h * 0.40)   # moitié basse = zone des feux
-    band_y2 = int(crop_h * 0.85)
-
-    left_band  = car_crop[band_y1:band_y2, 0:band_w]
-    right_band = car_crop[band_y1:band_y2, crop_w - band_w:crop_w]
-
-    # Convertir en HSV
-    left_hsv  = cv2.cvtColor(left_band,  cv2.COLOR_BGR2HSV)
-    right_hsv = cv2.cvtColor(right_band, cv2.COLOR_BGR2HSV)
-
-    # Masque rouge : feux arrière sont rouges
-    # Rouge en HSV : H dans [0-10] ou [170-180]
-    def red_pixel_count(hsv_img):
-        mask1 = cv2.inRange(hsv_img, (0,   80, 80), (10,  255, 255))
-        mask2 = cv2.inRange(hsv_img, (170, 80, 80), (180, 255, 255))
-        return cv2.countNonZero(cv2.bitwise_or(mask1, mask2))
-
-    red_left  = red_pixel_count(left_hsv)
-    red_right = red_pixel_count(right_hsv)
-
-    # Plus de rouge à gauche → feux arrière à gauche → avant à droite
-    if red_left > red_right * 1.5:
-        return "right"   # avant à droite
-    elif red_right > red_left * 1.5:
-        return "left"    # avant à gauche
+    # Zone de recherche selon l'orientation
+    # Le rétro est proche de l'avant, dans le tiers avant
+    # verticalement : entre 25% et 55% de la hauteur
+    if orientation == "left":
+        # avant à gauche → rétro dans le tiers gauche
+        search_x1 = int(crop_w * 0.10)
+        search_x2 = int(crop_w * 0.42)
     else:
-        # Pas de feux rouges clairs → on regarde aussi les détections YOLO
-        # class 9 = traffic light, on peut aussi utiliser les coords des feux
-        # Fallback : on compare la complexité de texture des deux côtés
-        # (l'arrière a plus de détails = feux, pare-choc, plaque)
-        left_gray  = cv2.cvtColor(left_band,  cv2.COLOR_BGR2GRAY)
-        right_gray = cv2.cvtColor(right_band, cv2.COLOR_BGR2GRAY)
-        left_std   = float(np.std(left_gray))
-        right_std  = float(np.std(right_gray))
+        # avant à droite → rétro dans le tiers droit
+        search_x1 = int(crop_w * 0.58)
+        search_x2 = int(crop_w * 0.90)
 
-        # Plus de texture à droite → arrière à droite → avant à gauche
-        if right_std > left_std * 1.2:
-            return "left"
+    search_y1 = int(crop_h * 0.22)
+    search_y2 = int(crop_h * 0.55)
+
+    search_zone = car_crop[search_y1:search_y2, search_x1:search_x2]
+    if search_zone.size == 0:
+        return None
+
+    # Convertir en niveaux de gris
+    gray = cv2.cvtColor(search_zone, cv2.COLOR_BGR2GRAY)
+
+    # Blur léger pour réduire le bruit
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+
+    # Détection des contours forts (le rétro a des bords nets)
+    edges = cv2.Canny(blurred, 40, 120)
+
+    # Dilatation pour regrouper les contours proches
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (8, 8))
+    dilated = cv2.dilate(edges, kernel, iterations=2)
+
+    # Trouver les contours fermés
+    contours, _ = cv2.findContours(
+        dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+    )
+
+    if not contours:
+        return None
+
+    # Filtrer : le rétro est un petit rectangle
+    # Surface entre 0.3% et 5% de la zone de recherche
+    zone_area = search_zone.shape[0] * search_zone.shape[1]
+    min_area  = zone_area * 0.003
+    max_area  = zone_area * 0.05
+
+    best = None
+    best_score = 0
+
+    for cnt in contours:
+        area = cv2.contourArea(cnt)
+        if area < min_area or area > max_area:
+            continue
+
+        x, y, w, h = cv2.boundingRect(cnt)
+
+        # Le rétro est plus large que haut (ratio)
+        ratio = w / h if h > 0 else 0
+        if ratio < 0.8 or ratio > 4.0:
+            continue
+
+        # Score : privilégier les contours nets et bien formés
+        perimeter = cv2.arcLength(cnt, True)
+        if perimeter == 0:
+            continue
+        compactness = (4 * np.pi * area) / (perimeter ** 2)
+        score = area * compactness
+
+        if score > best_score:
+            best_score = score
+            # Repasser en coords du crop complet
+            best = (
+                search_x1 + x,
+                search_y1 + y,
+                search_x1 + x + w,
+                search_y1 + y + h
+            )
+
+    return best
+
+
+# =========================
+# DÉTECTER ORIENTATION
+# 3 méthodes combinées + vote
+# =========================
+def detect_car_orientation(car_crop):
+    """
+    Méthode 1 : feux arrière rouges
+    Méthode 2 : position du pare-brise (grande zone sombre haute)
+    Méthode 3 : texture Sobel des bords (arrière = plus de détails)
+    Vote majoritaire → "left" ou "right"
+    """
+    crop_h, crop_w = car_crop.shape[:2]
+    votes_left  = 0
+    votes_right = 0
+
+    band_y1 = int(crop_h * 0.30)
+    band_y2 = int(crop_h * 0.85)
+    band_w  = int(crop_w * 0.22)
+
+    left_zone  = car_crop[band_y1:band_y2, 0:band_w]
+    right_zone = car_crop[band_y1:band_y2, crop_w - band_w:crop_w]
+
+    # -----------------------------------------------
+    # MÉTHODE 1 : feux rouges
+    # -----------------------------------------------
+    def count_red(zone):
+        hsv = cv2.cvtColor(zone, cv2.COLOR_BGR2HSV)
+        m1  = cv2.inRange(hsv, (0,   70, 70), (10,  255, 255))
+        m2  = cv2.inRange(hsv, (170, 70, 70), (180, 255, 255))
+        return cv2.countNonZero(cv2.bitwise_or(m1, m2))
+
+    red_left  = count_red(left_zone)
+    red_right = count_red(right_zone)
+
+    if red_left > red_right * 1.4:
+        votes_right += 1
+    elif red_right > red_left * 1.4:
+        votes_left += 1
+
+    # -----------------------------------------------
+    # MÉTHODE 2 : position du pare-brise
+    # -----------------------------------------------
+    gray     = cv2.cvtColor(car_crop, cv2.COLOR_BGR2GRAY)
+    top_band = gray[int(crop_h * 0.10):int(crop_h * 0.55), :]
+    dark_mask = (top_band < 80).astype(np.uint8)
+    col_sums  = dark_mask.sum(axis=0).astype(float)
+    col_sums  = np.convolve(col_sums, np.ones(20) / 20, mode='same')
+
+    total = col_sums.sum()
+    if total > 0:
+        center_x = float(np.sum(np.arange(len(col_sums)) * col_sums)) / total
+        third = crop_w / 3.0
+        if center_x < third:
+            votes_left += 1
+        elif center_x > crop_w - third:
+            votes_right += 1
         else:
-            return "right"
+            left_dark  = col_sums[:crop_w // 2].sum()
+            right_dark = col_sums[crop_w // 2:].sum()
+            if left_dark > right_dark * 1.3:
+                votes_left += 1
+            elif right_dark > left_dark * 1.3:
+                votes_right += 1
+
+    # -----------------------------------------------
+    # MÉTHODE 3 : texture Sobel
+    # -----------------------------------------------
+    left_gray   = cv2.cvtColor(left_zone,  cv2.COLOR_BGR2GRAY)
+    right_gray  = cv2.cvtColor(right_zone, cv2.COLOR_BGR2GRAY)
+    left_sobel  = cv2.Sobel(left_gray,  cv2.CV_64F, 1, 1, ksize=3)
+    right_sobel = cv2.Sobel(right_gray, cv2.CV_64F, 1, 1, ksize=3)
+    left_detail  = float(np.mean(np.abs(left_sobel)))
+    right_detail = float(np.mean(np.abs(right_sobel)))
+
+    if right_detail > left_detail * 1.25:
+        votes_left += 1
+    elif left_detail > right_detail * 1.25:
+        votes_right += 1
+
+    # -----------------------------------------------
+    # VOTE FINAL
+    # -----------------------------------------------
+    return "left" if votes_left >= votes_right else "right"
 
 
 # =========================
@@ -171,27 +296,27 @@ def analyse():
         crop_h, crop_w = car_crop.shape[:2]
 
         # ===============================================
-        # DÉTECTER L'ORIENTATION DE LA VOITURE
+        # ORIENTATION
         # ===============================================
-        orientation = detect_car_orientation(car_crop, detections, x1, y1)
+        orientation = detect_car_orientation(car_crop)
 
-        # Nommer les zones selon l'orientation détectée
         if orientation == "left":
-            # Avant à gauche → ordre normal
             zone_names = ["Aile avant", "Portes", "Aile arriere"]
         else:
-            # Avant à droite → ordre inversé
             zone_names = ["Aile arriere", "Portes", "Aile avant"]
+
+        # ===============================================
+        # RÉTROVISEUR
+        # ===============================================
+        mirror_box = detect_mirror(car_crop, orientation)
 
         # ===============================================
         # MASQUE CARROSSERIE
         # ===============================================
-        hsv_full = cv2.cvtColor(car_crop, cv2.COLOR_BGR2HSV)
-
+        hsv_full  = cv2.cvtColor(car_crop, cv2.COLOR_BGR2HSV)
         mask_dark = cv2.inRange(hsv_full, (0, 0, 0),   (180, 255, 45))
         mask_sky  = cv2.inRange(hsv_full, (0, 0, 210), (180, 18, 255))
         mask_body = cv2.bitwise_not(cv2.bitwise_or(mask_dark, mask_sky))
-
         kernel    = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
         mask_body = cv2.morphologyEx(mask_body, cv2.MORPH_CLOSE, kernel)
 
@@ -209,13 +334,12 @@ def analyse():
         ])
 
         # ===============================================
-        # 3 ZONES
+        # 3 ZONES CARROSSERIE
         # ===============================================
         band_y1 = int(crop_h * 0.15)
         band_y2 = int(crop_h * 0.80)
-
-        cut1 = int(crop_w * 0.33)
-        cut2 = int(crop_w * 0.67)
+        cut1    = int(crop_w * 0.33)
+        cut2    = int(crop_w * 0.67)
 
         zones = [
             {"name": zone_names[0], "xA": 0,    "xB": cut1,   "yA": band_y1, "yB": band_y2},
@@ -228,8 +352,10 @@ def analyse():
         # ===============================================
         final_img = img.copy()
 
+        # Contour total voiture
         cv2.rectangle(final_img, (x1, y1), (x2, y2), (220, 220, 220), 1)
 
+        # Séparateurs pointillés entre zones
         for cut in [cut1, cut2]:
             for dy in range(band_y1, band_y2, 12):
                 cv2.line(
@@ -277,10 +403,14 @@ def analyse():
 
                 label_score = str(int(diff))
 
-            cv2.rectangle(final_img, (abs_x1, abs_y1), (abs_x2, abs_y2), color_rect, 5)
+            # Grand rectangle zone
+            cv2.rectangle(final_img, (abs_x1, abs_y1), (abs_x2, abs_y2),
+                          color_rect, 5)
 
+            # Fond texte
             overlay = final_img.copy()
-            cv2.rectangle(overlay, (abs_x1, abs_y1), (abs_x2, abs_y1 + 55), (0, 0, 0), -1)
+            cv2.rectangle(overlay, (abs_x1, abs_y1),
+                          (abs_x2, abs_y1 + 55), (0, 0, 0), -1)
             cv2.addWeighted(overlay, 0.5, final_img, 0.5, 0, final_img)
 
             cv2.putText(final_img, zone["name"],
@@ -303,6 +433,64 @@ def analyse():
             })
 
         # ===============================================
+        # DESSIN RÉTROVISEUR
+        # ===============================================
+        mirror_result = None
+
+        if mirror_box is not None:
+            mx1, my1, mx2, my2 = mirror_box
+
+            # Coords absolues dans final_img
+            abs_mx1 = x1 + mx1
+            abs_my1 = y1 + my1
+            abs_mx2 = x1 + mx2
+            abs_my2 = y1 + my2
+
+            # Analyser la couleur du rétroviseur
+            mirror_color, mirror_px = get_zone_color(
+                hsv_full, mask_body, mx1, my1, mx2, my2
+            )
+
+            if mirror_color is not None:
+                mirror_diff = float(np.linalg.norm(mirror_color - ref_color))
+
+                if mirror_diff >= 14 and mirror_diff < 26:
+                    mirror_color_rect = (0, 0, 255)
+                    mirror_verdict    = "Retroviseur: peinture suspecte!"
+                elif mirror_diff < 14:
+                    mirror_color_rect = (0, 165, 255)
+                    mirror_verdict    = "Retroviseur: variation legere"
+                else:
+                    mirror_color_rect = (0, 210, 0)
+                    mirror_verdict    = "Retroviseur: OK"
+
+                mirror_result = {
+                    "diff":    round(mirror_diff, 1),
+                    "verdict": mirror_verdict,
+                    "box":     [abs_mx1, abs_my1, abs_mx2, abs_my2]
+                }
+            else:
+                mirror_color_rect = (200, 200, 0)
+                mirror_verdict    = "Retroviseur detecte"
+                mirror_result     = {
+                    "diff":    0,
+                    "verdict": mirror_verdict,
+                    "box":     [abs_mx1, abs_my1, abs_mx2, abs_my2]
+                }
+
+            # Rectangle rétroviseur (cyan, trait épais)
+            cv2.rectangle(final_img,
+                          (abs_mx1, abs_my1),
+                          (abs_mx2, abs_my2),
+                          (255, 255, 0), 3)
+
+            # Label rétroviseur
+            cv2.putText(final_img, mirror_verdict,
+                        (abs_mx1, abs_my1 - 8),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45,
+                        (255, 255, 0), 1)
+
+        # ===============================================
         # SCORE GLOBAL
         # ===============================================
         diffs = [z["diff"] for z in results_zones if z["diff"] > 0]
@@ -316,10 +504,13 @@ def analyse():
         else:
             result = "Difference importante — repeinture probable"
 
-        # Référence + orientation détectée en bas
+        # Info bas de l'image
         cv2.putText(
             final_img,
-            f"Ref: H={int(ref_color[0])} S={int(ref_color[1])} V={int(ref_color[2])}  |  Avant voiture: {'GAUCHE' if orientation == 'left' else 'DROITE'}",
+            f"Ref: H={int(ref_color[0])} S={int(ref_color[1])} "
+            f"V={int(ref_color[2])}  |  "
+            f"Avant: {'GAUCHE' if orientation == 'left' else 'DROITE'}  |  "
+            f"Retro: {'OUI' if mirror_box is not None else 'NON DETECTE'}",
             (10, img_h - 10),
             cv2.FONT_HERSHEY_SIMPLEX, 0.42, (200, 200, 200), 1
         )
@@ -336,6 +527,7 @@ def analyse():
             "score":          final_score,
             "result":         result,
             "zones":          results_zones,
+            "mirror":         mirror_result,
             "zones_detected": detected,
             "orientation":    orientation,
             "reference_hsv": {
