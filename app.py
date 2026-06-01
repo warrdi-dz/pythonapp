@@ -178,10 +178,10 @@ def analyse():
         # Nommer les zones selon l'orientation détectée
         if orientation == "left":
             # Avant à gauche → ordre normal
-            zone_names = ["Aile avant", "Portes", "Aile arriere"]
+            zone_names = ["avant", "Portes", " arriere"]
         else:
             # Avant à droite → ordre inversé
-            zone_names = ["Aile arriere", "Portes", "Aile avant"]
+            zone_names = ["arriere", "Portes", " avant"]
 
         # ===============================================
         # MASQUE CARROSSERIE
