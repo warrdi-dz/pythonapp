@@ -213,7 +213,7 @@ def analyse():
                 if diff < 23:
                     color_rect = (0, 0, 255)       # rouge — OK (peinture homogène)
                     verdict    = "OK"
-                elif diff < 25:
+                elif diff < 15:
                     color_rect = (0, 165, 255)     # orange — légère variation
                     verdict    = "Legere variation"
                     detected  += 1
