@@ -210,10 +210,10 @@ def analyse():
             else:
                 diff = float(np.linalg.norm(zone_color - ref_color))
 
-                if diff < 28:
+                if diff < 23:
                     color_rect = (0, 0, 255)       # rouge — OK (peinture homogène)
                     verdict    = "OK"
-                elif diff < 38:
+                elif diff < 25:
                     color_rect = (0, 165, 255)     # orange — légère variation
                     verdict    = "Legere variation"
                     detected  += 1
