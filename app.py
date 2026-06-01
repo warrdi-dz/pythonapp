@@ -12,8 +12,9 @@ app = Flask(__name__)
 UPLOAD_FOLDER = "uploads"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
-TARGET_W = 900
-TARGET_H = 500
+# Taille envoyée à YOLO uniquement
+YOLO_W = 900
+YOLO_H = 500
 
 # =========================
 # YOLO API CALL
@@ -100,25 +101,13 @@ def refine_car_bbox(img, x1, y1, x2, y2):
     return new_x1, new_y1, new_x2, new_y2
 
 
-# =============================================
+# =========================
 # DÉTECTER ORIENTATION
-#
-# PRIORITÉ 1 : feux arrière ROUGES
-#              → côté rouge = arrière
-# PRIORITÉ 2 : phares avant BLANCS/JAUNES
-#              → côté blanc = avant
-# PRIORITÉ 3 : pare-brise avant
-#              Le pare-brise AVANT est toujours
-#              plus grand que le pare-brise arrière
-#              On mesure la surface vitrée des
-#              deux côtés dans la zone haute
-# =============================================
+# =========================
 def detect_car_orientation(car_crop):
     crop_h, crop_w = car_crop.shape[:2]
     log = []
 
-    # Bandes gauche/droite (22% de largeur)
-    # Zone basse = feux (38% à 88% de hauteur)
     band_w  = int(crop_w * 0.22)
     feux_y1 = int(crop_h * 0.38)
     feux_y2 = int(crop_h * 0.88)
@@ -129,10 +118,7 @@ def detect_car_orientation(car_crop):
     left_hsv  = cv2.cvtColor(left_feux,  cv2.COLOR_BGR2HSV)
     right_hsv = cv2.cvtColor(right_feux, cv2.COLOR_BGR2HSV)
 
-    # -----------------------------------------------
-    # PRIORITÉ 1 : feux arrière ROUGES
-    # Rouge HSV : H=[0-12] ou [168-180], S>60, V>60
-    # -----------------------------------------------
+    # Priorité 1 : feux rouges
     def count_red(hsv):
         m1 = cv2.inRange(hsv, (0,   60, 60), (12,  255, 255))
         m2 = cv2.inRange(hsv, (168, 60, 60), (180, 255, 255))
@@ -142,7 +128,6 @@ def detect_car_orientation(car_crop):
     red_right = count_red(right_hsv)
     total_red = red_left + red_right
 
-    # Seuil minimum : au moins 150 pixels rouges au total
     if total_red > 150:
         if red_left > red_right * 1.35:
             log.append(f"P1 ROUGE: gauche={red_left} droite={red_right} → avant DROITE")
@@ -151,15 +136,11 @@ def detect_car_orientation(car_crop):
             log.append(f"P1 ROUGE: gauche={red_left} droite={red_right} → avant GAUCHE")
             return "left", log
         else:
-            log.append(f"P1 ROUGE: trop equilibre ({red_left}/{red_right}), on passe P2")
+            log.append(f"P1 ROUGE: equilibre ({red_left}/{red_right}), passe P2")
     else:
-        log.append(f"P1 ROUGE: pas assez de rouge ({total_red}px), on passe P2")
+        log.append(f"P1 ROUGE: insuffisant ({total_red}px), passe P2")
 
-    # -----------------------------------------------
-    # PRIORITÉ 2 : phares avant BLANCS/JAUNES
-    # Phare avant = zone très lumineuse
-    # HSV : V>170 ET (S<90 pour blanc OU H=[15-40] pour jaune)
-    # -----------------------------------------------
+    # Priorité 2 : phares blancs/jaunes
     def count_headlight(hsv):
         white  = cv2.inRange(hsv, (0,  0,  170), (180, 90,  255))
         yellow = cv2.inRange(hsv, (15, 40, 170), (40,  220, 255))
@@ -177,36 +158,20 @@ def detect_car_orientation(car_crop):
             log.append(f"P2 PHARE: gauche={light_left} droite={light_right} → avant DROITE")
             return "right", log
         else:
-            log.append(f"P2 PHARE: trop equilibre ({light_left}/{light_right}), on passe P3")
+            log.append(f"P2 PHARE: equilibre ({light_left}/{light_right}), passe P3")
     else:
-        log.append(f"P2 PHARE: pas assez de lumiere ({total_light}px), on passe P3")
+        log.append(f"P2 PHARE: insuffisant ({total_light}px), passe P3")
 
-    # -----------------------------------------------
-    # PRIORITÉ 3 : taille du pare-brise
-    #
-    # Le pare-brise AVANT est toujours plus grand
-    # que la lunette arrière.
-    # On cherche les zones sombres (vitres) dans
-    # la bande haute (8% à 55% de hauteur).
-    # On divise en deux moitiés gauche/droite
-    # et on mesure la surface vitrée de chaque côté.
-    # Le côté avec PLUS de surface vitrée = avant
-    # -----------------------------------------------
-    gray     = cv2.cvtColor(car_crop, cv2.COLOR_BGR2GRAY)
-    vit_y1   = int(crop_h * 0.08)
-    vit_y2   = int(crop_h * 0.58)
-    vitre    = gray[vit_y1:vit_y2, :]
-
-    # Pixels sombres = vitre (valeur < 90)
-    dark = (vitre < 90).astype(np.uint8)
-
-    # Lisser pour ignorer le bruit
-    dark_f = cv2.GaussianBlur(dark.astype(np.float32), (15, 15), 0)
-
-    # Surface vitrée côté gauche vs côté droit
-    mid          = crop_w // 2
-    left_glass   = float(dark_f[:, :mid].sum())
-    right_glass  = float(dark_f[:, mid:].sum())
+    # Priorité 3 : taille pare-brise
+    gray       = cv2.cvtColor(car_crop, cv2.COLOR_BGR2GRAY)
+    vit_y1     = int(crop_h * 0.08)
+    vit_y2     = int(crop_h * 0.58)
+    vitre      = gray[vit_y1:vit_y2, :]
+    dark       = (vitre < 90).astype(np.uint8)
+    dark_f     = cv2.GaussianBlur(dark.astype(np.float32), (15, 15), 0)
+    mid        = crop_w // 2
+    left_glass  = float(dark_f[:, :mid].sum())
+    right_glass = float(dark_f[:, mid:].sum())
 
     log.append(f"P3 VITRE: gauche={int(left_glass)} droite={int(right_glass)}")
 
@@ -217,22 +182,19 @@ def detect_car_orientation(car_crop):
         log.append("P3 VITRE: plus grand droite → avant DROITE")
         return "right", log
 
-    # -----------------------------------------------
-    # FALLBACK : texture Sobel si tout échoue
-    # -----------------------------------------------
+    # Fallback Sobel
     left_band  = car_crop[feux_y1:feux_y2, 0:band_w]
     right_band = car_crop[feux_y1:feux_y2, crop_w - band_w:crop_w]
-
     lg = cv2.cvtColor(left_band,  cv2.COLOR_BGR2GRAY)
     rg = cv2.cvtColor(right_band, cv2.COLOR_BGR2GRAY)
     ls = float(np.mean(np.abs(cv2.Sobel(lg, cv2.CV_64F, 1, 1, ksize=3))))
     rs = float(np.mean(np.abs(cv2.Sobel(rg, cv2.CV_64F, 1, 1, ksize=3))))
 
     if rs > ls * 1.2:
-        log.append(f"FALLBACK Sobel: droite={rs:.1f}>gauche={ls:.1f} → avant GAUCHE")
+        log.append(f"FALLBACK Sobel: droite>{ls:.1f} → avant GAUCHE")
         return "left", log
     else:
-        log.append(f"FALLBACK Sobel: gauche={ls:.1f}>=droite={rs:.1f} → avant DROITE")
+        log.append(f"FALLBACK Sobel: gauche>={rs:.1f} → avant DROITE")
         return "right", log
 
 
@@ -250,38 +212,59 @@ def analyse():
         path     = os.path.join(UPLOAD_FOLDER, filename)
         file.save(path)
 
+        # ===============================================
+        # LIRE IMAGE ORIGINALE — on garde sa résolution
+        # ===============================================
         img_orig = cv2.imread(path)
         if img_orig is None:
             return jsonify({"error": "image unreadable"}), 400
 
-        img = cv2.resize(img_orig, (TARGET_W, TARGET_H))
+        orig_h, orig_w = img_orig.shape[:2]
 
+        # ===============================================
+        # YOLO reçoit une version réduite 900x500
+        # pour que les coords matchent facilement
+        # ===============================================
+        img_yolo     = cv2.resize(img_orig, (YOLO_W, YOLO_H))
         resized_path = os.path.join(UPLOAD_FOLDER, "resized_" + filename)
-        cv2.imwrite(resized_path, img)
+        cv2.imwrite(resized_path, img_yolo)
 
         yolo_result = call_yolo(resized_path)
-
-        img_h, img_w = img.shape[:2]
 
         detections = yolo_result.get("detections", [])
         cars = [d for d in detections if d.get("class") == 2]
         if not cars:
             return jsonify({"error": "Car not detected"}), 400
 
-        raw_x1 = min(d["box"][0] for d in cars)
-        raw_y1 = min(d["box"][1] for d in cars)
-        raw_x2 = max(d["box"][2] for d in cars)
-        raw_y2 = max(d["box"][3] for d in cars)
+        # ===============================================
+        # COORDONNÉES YOLO sur 900x500
+        # → on les rescale sur la résolution originale
+        # ===============================================
+        scale_x = orig_w / YOLO_W
+        scale_y = orig_h / YOLO_H
 
-        x1 = 0      if raw_x1 < 150           else max(0,     raw_x1 - 15)
-        x2 = img_w  if (img_w - raw_x2) < 150 else min(img_w, raw_x2 + 15)
-        y1 = 0      if raw_y1 < 80            else max(0,     raw_y1 - 10)
-        y2 = img_h  if (img_h - raw_y2) < 80  else min(img_h, raw_y2 + 10)
+        raw_x1 = int(min(d["box"][0] for d in cars) * scale_x)
+        raw_y1 = int(min(d["box"][1] for d in cars) * scale_y)
+        raw_x2 = int(max(d["box"][2] for d in cars) * scale_x)
+        raw_y2 = int(max(d["box"][3] for d in cars) * scale_y)
 
-        # Affiner le crop
-        x1, y1, x2, y2 = refine_car_bbox(img, x1, y1, x2, y2)
+        # Padding proportionnel à la résolution originale
+        pad_x = int(15 * scale_x)
+        pad_y = int(10 * scale_y)
+        thr_x = int(150 * scale_x)
+        thr_y = int(80  * scale_y)
 
-        car_crop = img[y1:y2, x1:x2]
+        x1 = 0       if raw_x1 < thr_x             else max(0,      raw_x1 - pad_x)
+        x2 = orig_w  if (orig_w - raw_x2) < thr_x  else min(orig_w, raw_x2 + pad_x)
+        y1 = 0       if raw_y1 < thr_y             else max(0,      raw_y1 - pad_y)
+        y2 = orig_h  if (orig_h - raw_y2) < thr_y  else min(orig_h, raw_y2 + pad_y)
+
+        # ===============================================
+        # AFFINER LE CROP sur l'image originale
+        # ===============================================
+        x1, y1, x2, y2 = refine_car_bbox(img_orig, x1, y1, x2, y2)
+
+        car_crop = img_orig[y1:y2, x1:x2]
         if car_crop.size == 0:
             return jsonify({"error": "invalid crop"}), 400
 
@@ -321,7 +304,7 @@ def analyse():
         ])
 
         # ===============================================
-        # 3 ZONES
+        # 3 ZONES — proportionnelles au vrai crop
         # ===============================================
         band_y1 = int(crop_h * 0.15)
         band_y2 = int(crop_h * 0.80)
@@ -335,18 +318,33 @@ def analyse():
         ]
 
         # ===============================================
-        # DESSIN
+        # DESSIN sur l'image ORIGINALE haute résolution
         # ===============================================
-        final_img = img.copy()
-        cv2.rectangle(final_img, (x1, y1), (x2, y2), (220, 220, 220), 1)
+        final_img = img_orig.copy()
 
+        # Épaisseur des traits proportionnelle à la résolution
+        thick_box  = max(3, int(5  * min(scale_x, scale_y)))
+        thick_line = max(1, int(1  * min(scale_x, scale_y)))
+        font_scale_big  = max(0.6, 0.6  * min(scale_x, scale_y))
+        font_scale_med  = max(0.5, 0.5  * min(scale_x, scale_y))
+        font_scale_ref  = max(0.4, 0.38 * min(scale_x, scale_y))
+        font_thick_big  = max(2, int(2  * min(scale_x, scale_y)))
+        font_thick_small= max(1, int(1  * min(scale_x, scale_y)))
+        overlay_h       = max(55, int(55 * scale_y))
+
+        # Contour total voiture
+        cv2.rectangle(final_img, (x1, y1), (x2, y2), (220, 220, 220), thick_line)
+
+        # Séparateurs pointillés
+        step  = max(10, int(12 * scale_y))
+        dash  = max(4,  int(6  * scale_y))
         for cut in [cut1, cut2]:
-            for dy in range(band_y1, band_y2, 12):
+            for dy in range(band_y1, band_y2, step):
                 cv2.line(
                     final_img,
                     (x1 + cut, y1 + dy),
-                    (x1 + cut, y1 + dy + 6),
-                    (255, 255, 255), 1
+                    (x1 + cut, y1 + dy + dash),
+                    (255, 255, 255), thick_line
                 )
 
         results_zones = []
@@ -388,22 +386,27 @@ def analyse():
                 label_score = str(int(diff))
 
             cv2.rectangle(final_img, (abs_x1, abs_y1),
-                          (abs_x2, abs_y2), color_rect, 5)
+                          (abs_x2, abs_y2), color_rect, thick_box)
 
             overlay = final_img.copy()
             cv2.rectangle(overlay, (abs_x1, abs_y1),
-                          (abs_x2, abs_y1 + 55), (0, 0, 0), -1)
+                          (abs_x2, abs_y1 + overlay_h), (0, 0, 0), -1)
             cv2.addWeighted(overlay, 0.5, final_img, 0.5, 0, final_img)
 
             cv2.putText(final_img, zone["name"],
-                        (abs_x1 + 8, abs_y1 + 22),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+                        (abs_x1 + 8, abs_y1 + int(overlay_h * 0.40)),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        font_scale_big, (255, 255, 255), font_thick_big)
+
             cv2.putText(final_img, f"Ecart: {label_score}",
-                        (abs_x1 + 8, abs_y1 + 44),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, color_rect, 2)
+                        (abs_x1 + 8, abs_y1 + int(overlay_h * 0.80)),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        font_scale_med, color_rect, font_thick_big)
+
             cv2.putText(final_img, verdict,
-                        (abs_x1 + 8, abs_y2 - 10),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, color_rect, 2)
+                        (abs_x1 + 8, abs_y2 - int(10 * scale_y)),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        font_scale_med, color_rect, font_thick_big)
 
             results_zones.append({
                 "zone":    zone["name"],
@@ -431,13 +434,16 @@ def analyse():
             f"Ref: H={int(ref_color[0])} S={int(ref_color[1])} "
             f"V={int(ref_color[2])}  |  "
             f"Avant: {'GAUCHE' if orientation == 'left' else 'DROITE'}  |  "
-            f"Detection: {orient_log[-1][:30]}",
-            (10, img_h - 10),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.38, (200, 200, 200), 1
+            f"{orient_log[-1][:35]}",
+            (10, orig_h - int(10 * scale_y)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            font_scale_ref, (200, 200, 200), font_thick_small
         )
 
         analysed_name = "analysed_" + filename
         analysed_path = os.path.join(UPLOAD_FOLDER, analysed_name)
+
+        # Sauvegarde en qualité originale
         cv2.imwrite(analysed_path, final_img)
 
         if os.path.exists(resized_path):
@@ -451,6 +457,7 @@ def analyse():
             "zones_detected":  detected,
             "orientation":     orientation,
             "orientation_log": orient_log,
+            "image_size":      {"width": orig_w, "height": orig_h},
             "reference_hsv": {
                 "H": round(ref_color[0], 1),
                 "S": round(ref_color[1], 1),
