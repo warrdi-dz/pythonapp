@@ -69,58 +69,33 @@ def get_zone_color(hsv_img, mask, xA, yA, xB, yB):
 # est à gauche, "right" sinon
 # =========================
 def detect_car_orientation(car_crop, detections, x1_car, y1_car):
-    """
-    Stratégie : chercher les feux avant (blancs/jaunes)
-    vs feux arrière (rouges) dans les bandes gauche/droite.
-    Si on trouve du rouge à gauche → avant est à droite.
-    Si on trouve du rouge à droite → avant est à gauche.
-    Par défaut : compare la saturation rouge des deux côtés.
-    """
+
     crop_h, crop_w = car_crop.shape[:2]
 
-    # Bande gauche et droite (20% de la largeur, zone basse = feux)
-    band_w  = int(crop_w * 0.20)
-    band_y1 = int(crop_h * 0.40)   # moitié basse = zone des feux
-    band_y2 = int(crop_h * 0.85)
+    gray = cv2.cvtColor(car_crop, cv2.COLOR_BGR2GRAY)
 
-    left_band  = car_crop[band_y1:band_y2, 0:band_w]
-    right_band = car_crop[band_y1:band_y2, crop_w - band_w:crop_w]
+    # Détection des contours
+    edges = cv2.Canny(gray, 80, 180)
 
-    # Convertir en HSV
-    left_hsv  = cv2.cvtColor(left_band,  cv2.COLOR_BGR2HSV)
-    right_hsv = cv2.cvtColor(right_band, cv2.COLOR_BGR2HSV)
+    # Projection verticale
+    cols_sum = np.sum(edges > 0, axis=0)
 
-    # Masque rouge : feux arrière sont rouges
-    # Rouge en HSV : H dans [0-10] ou [170-180]
-    def red_pixel_count(hsv_img):
-        mask1 = cv2.inRange(hsv_img, (0,   80, 80), (10,  255, 255))
-        mask2 = cv2.inRange(hsv_img, (170, 80, 80), (180, 255, 255))
-        return cv2.countNonZero(cv2.bitwise_or(mask1, mask2))
+    # Partie gauche et droite
+    left_part  = cols_sum[:crop_w // 2]
+    right_part = cols_sum[crop_w // 2:]
 
-    red_left  = red_pixel_count(left_hsv)
-    red_right = red_pixel_count(right_hsv)
+    # Chercher où commencent les gros contours
+    left_idx = np.argmax(left_part > np.mean(left_part))
+    right_idx = np.argmax(right_part[::-1] > np.mean(right_part))
 
-    # Plus de rouge à gauche → feux arrière à gauche → avant à droite
-    if red_left > red_right * 1.5:
-        return "right"   # avant à droite
-    elif red_right > red_left * 1.5:
-        return "left"    # avant à gauche
+    left_length = (crop_w // 2) - left_idx
+    right_length = (crop_w // 2) - right_idx
+
+    # Côté le plus long = avant
+    if left_length > right_length:
+        return "left"      # avant à gauche
     else:
-        # Pas de feux rouges clairs → on regarde aussi les détections YOLO
-        # class 9 = traffic light, on peut aussi utiliser les coords des feux
-        # Fallback : on compare la complexité de texture des deux côtés
-        # (l'arrière a plus de détails = feux, pare-choc, plaque)
-        left_gray  = cv2.cvtColor(left_band,  cv2.COLOR_BGR2GRAY)
-        right_gray = cv2.cvtColor(right_band, cv2.COLOR_BGR2GRAY)
-        left_std   = float(np.std(left_gray))
-        right_std  = float(np.std(right_gray))
-
-        # Plus de texture à droite → arrière à droite → avant à gauche
-        if right_std > left_std * 1.2:
-            return "left"
-        else:
-            return "right"
-
+        return "right"     # avant à droite
 
 # =========================
 # ANALYSE
