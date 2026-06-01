@@ -293,9 +293,9 @@ def analyse():
         orientation, orient_log = detect_car_orientation(car_crop)
 
         if orientation == "left":
-            zone_names = ["Aile avant", "Portes", "Aile arriere"]
+            zone_names = ["Avant", "Portes", "Arriere"]
         else:
-            zone_names = ["Aile arriere", "Portes", "Aile avant"]
+            zone_names = ["Arriere", "Portes", "Avant"]
 
         # ===============================================
         # MASQUE CARROSSERIE
