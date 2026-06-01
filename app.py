@@ -429,16 +429,7 @@ def analyse():
         else:
             result = "Difference importante — repeinture probable"
 
-        cv2.putText(
-            final_img,
-            f"Ref: H={int(ref_color[0])} S={int(ref_color[1])} "
-            f"V={int(ref_color[2])}  |  "
-            f"Avant: {'GAUCHE' if orientation == 'left' else 'DROITE'}  |  "
-            f"{orient_log[-1][:35]}",
-            (10, orig_h - int(10 * scale_y)),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            font_scale_ref, (200, 200, 200), font_thick_small
-        )
+        
 
         analysed_name = "analysed_" + filename
         analysed_path = os.path.join(UPLOAD_FOLDER, analysed_name)
