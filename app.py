@@ -64,6 +64,65 @@ def get_zone_color(hsv_img, mask, xA, yA, xB, yB):
 
 
 # =========================
+# DÉTECTER SENS VOITURE
+# Retourne "left" si l'avant
+# est à gauche, "right" sinon
+# =========================
+def detect_car_orientation(car_crop, detections, x1_car, y1_car):
+    """
+    Stratégie : chercher les feux avant (blancs/jaunes)
+    vs feux arrière (rouges) dans les bandes gauche/droite.
+    Si on trouve du rouge à gauche → avant est à droite.
+    Si on trouve du rouge à droite → avant est à gauche.
+    Par défaut : compare la saturation rouge des deux côtés.
+    """
+    crop_h, crop_w = car_crop.shape[:2]
+
+    # Bande gauche et droite (20% de la largeur, zone basse = feux)
+    band_w  = int(crop_w * 0.20)
+    band_y1 = int(crop_h * 0.40)   # moitié basse = zone des feux
+    band_y2 = int(crop_h * 0.85)
+
+    left_band  = car_crop[band_y1:band_y2, 0:band_w]
+    right_band = car_crop[band_y1:band_y2, crop_w - band_w:crop_w]
+
+    # Convertir en HSV
+    left_hsv  = cv2.cvtColor(left_band,  cv2.COLOR_BGR2HSV)
+    right_hsv = cv2.cvtColor(right_band, cv2.COLOR_BGR2HSV)
+
+    # Masque rouge : feux arrière sont rouges
+    # Rouge en HSV : H dans [0-10] ou [170-180]
+    def red_pixel_count(hsv_img):
+        mask1 = cv2.inRange(hsv_img, (0,   80, 80), (10,  255, 255))
+        mask2 = cv2.inRange(hsv_img, (170, 80, 80), (180, 255, 255))
+        return cv2.countNonZero(cv2.bitwise_or(mask1, mask2))
+
+    red_left  = red_pixel_count(left_hsv)
+    red_right = red_pixel_count(right_hsv)
+
+    # Plus de rouge à gauche → feux arrière à gauche → avant à droite
+    if red_left > red_right * 1.5:
+        return "right"   # avant à droite
+    elif red_right > red_left * 1.5:
+        return "left"    # avant à gauche
+    else:
+        # Pas de feux rouges clairs → on regarde aussi les détections YOLO
+        # class 9 = traffic light, on peut aussi utiliser les coords des feux
+        # Fallback : on compare la complexité de texture des deux côtés
+        # (l'arrière a plus de détails = feux, pare-choc, plaque)
+        left_gray  = cv2.cvtColor(left_band,  cv2.COLOR_BGR2GRAY)
+        right_gray = cv2.cvtColor(right_band, cv2.COLOR_BGR2GRAY)
+        left_std   = float(np.std(left_gray))
+        right_std  = float(np.std(right_gray))
+
+        # Plus de texture à droite → arrière à droite → avant à gauche
+        if right_std > left_std * 1.2:
+            return "left"
+        else:
+            return "right"
+
+
+# =========================
 # ANALYSE
 # =========================
 @app.route("/analyse", methods=["POST"])
@@ -77,55 +136,52 @@ def analyse():
         path = os.path.join(UPLOAD_FOLDER, filename)
         file.save(path)
 
-        # ===============================================
-        # LIRE L'IMAGE ORIGINALE
-        # ===============================================
         img_orig = cv2.imread(path)
         if img_orig is None:
             return jsonify({"error": "image unreadable"}), 400
 
-        orig_h, orig_w = img_orig.shape[:2]
-
-        # ===============================================
-        # REDIMENSIONNER ET SAUVEGARDER
-        # → on envoie l'image DÉJÀ redimensionnée à YOLO
-        # comme ça les coordonnées matchent directement
-        # ===============================================
         img = cv2.resize(img_orig, (TARGET_W, TARGET_H))
 
         resized_path = os.path.join(UPLOAD_FOLDER, "resized_" + filename)
         cv2.imwrite(resized_path, img)
 
-        # YOLO reçoit l'image redimensionnée
         yolo_result = call_yolo(resized_path)
 
-        img_h, img_w = img.shape[:2]   # = TARGET_H, TARGET_W
+        img_h, img_w = img.shape[:2]
 
         detections = yolo_result.get("detections", [])
         cars = [d for d in detections if d.get("class") == 2]
         if not cars:
             return jsonify({"error": "Car not detected"}), 400
 
-        # ===============================================
-        # BOUNDING BOX sur l'image 900x500
-        # Les coordonnées YOLO matchent maintenant pile
-        # ===============================================
         raw_x1 = min(d["box"][0] for d in cars)
         raw_y1 = min(d["box"][1] for d in cars)
         raw_x2 = max(d["box"][2] for d in cars)
         raw_y2 = max(d["box"][3] for d in cars)
 
-        # Si YOLO s'arrête à moins de 150px d'un bord → on force au bord
-        x1 = 0      if raw_x1 < 150             else max(0,     raw_x1 - 15)
-        x2 = img_w  if (img_w - raw_x2) < 150   else min(img_w, raw_x2 + 15)
-        y1 = 0      if raw_y1 < 80              else max(0,     raw_y1 - 10)
-        y2 = img_h  if (img_h - raw_y2) < 80    else min(img_h, raw_y2 + 10)
+        x1 = 0      if raw_x1 < 150           else max(0,     raw_x1 - 15)
+        x2 = img_w  if (img_w - raw_x2) < 150 else min(img_w, raw_x2 + 15)
+        y1 = 0      if raw_y1 < 80            else max(0,     raw_y1 - 10)
+        y2 = img_h  if (img_h - raw_y2) < 80  else min(img_h, raw_y2 + 10)
 
         car_crop = img[y1:y2, x1:x2]
         if car_crop.size == 0:
             return jsonify({"error": "invalid crop"}), 400
 
         crop_h, crop_w = car_crop.shape[:2]
+
+        # ===============================================
+        # DÉTECTER L'ORIENTATION DE LA VOITURE
+        # ===============================================
+        orientation = detect_car_orientation(car_crop, detections, x1, y1)
+
+        # Nommer les zones selon l'orientation détectée
+        if orientation == "left":
+            # Avant à gauche → ordre normal
+            zone_names = ["Aile avant", "Portes", "Aile arriere"]
+        else:
+            # Avant à droite → ordre inversé
+            zone_names = ["Aile arriere", "Portes", "Aile avant"]
 
         # ===============================================
         # MASQUE CARROSSERIE
@@ -153,7 +209,7 @@ def analyse():
         ])
 
         # ===============================================
-        # 3 ZONES sur la bande carrosserie
+        # 3 ZONES
         # ===============================================
         band_y1 = int(crop_h * 0.15)
         band_y2 = int(crop_h * 0.80)
@@ -162,20 +218,18 @@ def analyse():
         cut2 = int(crop_w * 0.67)
 
         zones = [
-            {"name": "Aile avant",   "xA": 0,    "xB": cut1, "yA": band_y1, "yB": band_y2},
-            {"name": "Portes",       "xA": cut1, "xB": cut2, "yA": band_y1, "yB": band_y2},
-            {"name": "Aile arriere", "xA": cut2, "xB": crop_w, "yA": band_y1, "yB": band_y2},
+            {"name": zone_names[0], "xA": 0,    "xB": cut1,   "yA": band_y1, "yB": band_y2},
+            {"name": zone_names[1], "xA": cut1, "xB": cut2,   "yA": band_y1, "yB": band_y2},
+            {"name": zone_names[2], "xA": cut2, "xB": crop_w, "yA": band_y1, "yB": band_y2},
         ]
 
         # ===============================================
-        # DESSIN SUR L'IMAGE 900x500
+        # DESSIN
         # ===============================================
         final_img = img.copy()
 
-        # Contour total voiture
         cv2.rectangle(final_img, (x1, y1), (x2, y2), (220, 220, 220), 1)
 
-        # Lignes séparatrices pointillées
         for cut in [cut1, cut2]:
             for dy in range(band_y1, band_y2, 12):
                 cv2.line(
@@ -196,7 +250,6 @@ def analyse():
                 hsv_full, mask_body, xA, yA, xB, yB
             )
 
-            # Coordonnées absolues dans final_img
             abs_x1 = x1 + xA
             abs_y1 = y1 + yA
             abs_x2 = x1 + xB
@@ -210,39 +263,34 @@ def analyse():
             else:
                 diff = float(np.linalg.norm(zone_color - ref_color))
 
-                if  diff >= 14 and diff < 26:
-                    color_rect = (0, 0, 255)       # rouge — positive
-                    verdict    = "Attention peinture refaite!!! "
+                if diff >= 14 and diff < 26:
+                    color_rect = (0, 0, 255)
+                    verdict    = "Attention peinture refaite!"
                 elif diff < 14:
-                    color_rect = (0, 165, 255)     # orange — légère variation
-                    verdict    = "Legere variation suspect !"
+                    color_rect = (0, 165, 255)
+                    verdict    = "Legere variation suspecte!"
                     detected  += 1
                 else:
-                    color_rect = (0, 210, 0)       # vert — negative
-                    verdict    = "OK - verifier"
+                    color_rect = (0, 210, 0)
+                    verdict    = "OK"
                     detected  += 1
 
                 label_score = str(int(diff))
 
-            # Grand rectangle
             cv2.rectangle(final_img, (abs_x1, abs_y1), (abs_x2, abs_y2), color_rect, 5)
 
-            # Fond texte semi-transparent
             overlay = final_img.copy()
             cv2.rectangle(overlay, (abs_x1, abs_y1), (abs_x2, abs_y1 + 55), (0, 0, 0), -1)
             cv2.addWeighted(overlay, 0.5, final_img, 0.5, 0, final_img)
 
-            # Nom zone
             cv2.putText(final_img, zone["name"],
                         (abs_x1 + 8, abs_y1 + 22),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
 
-            # Écart
             cv2.putText(final_img, f"Ecart: {label_score}",
                         (abs_x1 + 8, abs_y1 + 44),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, color_rect, 2)
 
-            # Verdict en bas
             cv2.putText(final_img, verdict,
                         (abs_x1 + 8, abs_y2 - 10),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, color_rect, 2)
@@ -268,19 +316,18 @@ def analyse():
         else:
             result = "Difference importante — repeinture probable"
 
-        # Référence globale en bas
+        # Référence + orientation détectée en bas
         cv2.putText(
             final_img,
-            f"Ref : H={int(ref_color[0])}  S={int(ref_color[1])}  V={int(ref_color[2])}",
+            f"Ref: H={int(ref_color[0])} S={int(ref_color[1])} V={int(ref_color[2])}  |  Avant voiture: {'GAUCHE' if orientation == 'left' else 'DROITE'}",
             (10, img_h - 10),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1
+            cv2.FONT_HERSHEY_SIMPLEX, 0.42, (200, 200, 200), 1
         )
 
         analysed_name = "analysed_" + filename
         analysed_path = os.path.join(UPLOAD_FOLDER, analysed_name)
         cv2.imwrite(analysed_path, final_img)
 
-        # Nettoyer le fichier temporaire redimensionné
         if os.path.exists(resized_path):
             os.remove(resized_path)
 
@@ -290,6 +337,7 @@ def analyse():
             "result":         result,
             "zones":          results_zones,
             "zones_detected": detected,
+            "orientation":    orientation,
             "reference_hsv": {
                 "H": round(ref_color[0], 1),
                 "S": round(ref_color[1], 1),
