@@ -12,6 +12,7 @@ app = Flask(__name__)
 UPLOAD_FOLDER = "uploads"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
+# Taille envoyée à YOLO uniquement
 YOLO_W = 900
 YOLO_H = 500
 
@@ -44,175 +45,20 @@ def uploads(filename):
 def home():
     return jsonify({"status": "OK", "message": "GARAGE PRO V4 API"})
 
-
-# =============================================
-# MODIFICATION 9 : MASQUE CARROSSERIE AMÉLIORÉ
-# Retire vitres, pneus, plastique, calandre,
-# reflets très brillants
-# =============================================
-def build_body_mask(car_crop, hsv_full):
-    # Trop sombre = vitres, pneus, joints
-    mask_dark = cv2.inRange(hsv_full, (0, 0, 0), (180, 255, 45))
-
-    # Blanc pur = ciel, fond
-    mask_sky = cv2.inRange(hsv_full, (0, 0, 210), (180, 18, 255))
-
-    # MOD 9 : faible saturation = plastique noir, calandre, chrome
-    mask_low_sat = cv2.inRange(hsv_full, (0, 0, 0), (180, 40, 255))
-
-    # MOD 5 : pixels très brillants = reflets soleil (V > 230)
-    mask_overexposed = cv2.inRange(hsv_full, (0, 0, 230), (180, 255, 255))
-
-    # Masque final = carrosserie peinte uniquement
-    mask_exclude = cv2.bitwise_or(mask_dark, mask_sky)
-    mask_exclude = cv2.bitwise_or(mask_exclude, mask_low_sat)
-    mask_exclude = cv2.bitwise_or(mask_exclude, mask_overexposed)
-    mask_body    = cv2.bitwise_not(mask_exclude)
-
-    kernel    = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-    mask_body = cv2.morphologyEx(mask_body, cv2.MORPH_CLOSE, kernel)
-
-    return mask_body
-
-
-# =============================================
-# MODIFICATION 1+2+3 : FEATURES LAB + TEXTURE
-# + BRILLANCE sur pixels valides
-# =============================================
-def get_zone_features(lab_img, gray_img, mask, xA, yA, xB, yB):
+# =========================
+# COULEUR HSV MÉDIANE
+# =========================
+def get_zone_color(hsv_img, mask, xA, yA, xB, yB):
     zone_mask = mask[yA:yB, xA:xB]
-    zone_lab  = lab_img[yA:yB, xA:xB]
-    zone_gray = gray_img[yA:yB, xA:xB]
-
-    valid_lab  = zone_lab[zone_mask > 0]
-    valid_gray = zone_gray[zone_mask > 0]
-
-    if len(valid_lab) < 80:
-        return None
-
-    # MOD 1 : couleur LAB complète
-    lab_color = np.array([
-        float(np.median(valid_lab[:, 0])),
-        float(np.median(valid_lab[:, 1])),
-        float(np.median(valid_lab[:, 2]))
-    ])
-
-    # MOD 2 : texture = std des pixels gris
-    texture = float(np.std(valid_gray))
-
-    # MOD 3 : brillance = médiane canal L
-    brillance = float(np.median(valid_lab[:, 0]))
-
-    return {
-        "lab":      lab_color,
-        "texture":  texture,
-        "brillance":brillance,
-        "count":    len(valid_lab)
-    }
-
-
-# =============================================
-# MODIFICATION 4 : SCORE COMBINÉ INTELLIGENT
-# delta_e * 0.50 + texture * 0.30 + bril * 0.20
-# =============================================
-def compute_score(zone_f, ref_f):
-    # MOD 1 : Delta E LAB
-    delta_e = float(np.linalg.norm(zone_f["lab"] - ref_f["lab"]))
-
-    # MOD 2 : Delta texture
-    delta_tex = abs(zone_f["texture"] - ref_f["texture"])
-
-    # MOD 3 : Delta brillance
-    delta_bril = abs(zone_f["brillance"] - ref_f["brillance"])
-
-    # MOD 4 : Score combiné
-    score = (delta_e   * 0.50) + \
-            (delta_tex * 0.30) + \
-            (delta_bril * 0.20)
-
-    return {
-        "score":      round(score, 1),
-        "delta_e":    round(delta_e, 1),
-        "delta_tex":  round(delta_tex, 1),
-        "delta_bril": round(delta_bril, 1)
-    }
-
-
-# =============================================
-# MODIFICATION 6 : COHÉRENCE INTERNE
-# 3 bandes horizontales haut/milieu/bas
-# std_bandes < 8 = vraie repeinture
-# =============================================
-def check_internal_coherence(lab_img, gray_img, mask,
-                              xA, yA, xB, yB, ref_f):
-    zone_h  = yB - yA
-    band_h  = zone_h // 3
-    scores  = []
-
-    for b in range(3):
-        byA = yA + b * band_h
-        byB = yA + (b + 1) * band_h if b < 2 else yB
-        f   = get_zone_features(lab_img, gray_img, mask, xA, byA, xB, byB)
-        if f is None:
-            continue
-        r = compute_score(f, ref_f)
-        scores.append(r["score"])
-
-    if len(scores) < 2:
-        return 0.0, False
-
-    std_bandes    = float(np.std(scores))
-    mean_score    = float(np.mean(scores))
-
-    # MOD 6 : cohérence confirmée = vrai repeinture probable
-    is_coherent   = (std_bandes < 8.0) and (mean_score > 10.0)
-    bonus         = 10.0 if is_coherent else 0.0
-
-    return bonus, is_coherent
-
-
-# =============================================
-# MODIFICATION 8 : RACCORDS DE PEINTURE
-# Comparer couleur de chaque côté de la coupure
-# =============================================
-def detect_border_discontinuity(lab_img, mask, x_border, yA, yB):
-    h, w = lab_img.shape[:2]
-    bw   = 40
-    x1b  = max(0, x_border - bw)
-    x2b  = min(w, x_border + bw)
-
-    if x2b - x1b < 10:
-        return 0.0
-
-    band_lab  = lab_img[yA:yB, x1b:x2b].astype(np.float32)
-    band_mask = mask[yA:yB, x1b:x2b]
-
-    if band_mask.sum() < 50:
-        return 0.0
-
-    # Utilise a,b (teinte) pas L (luminosité)
-    band_a = band_lab[:, :, 1].copy()
-    band_b = band_lab[:, :, 2].copy()
-    band_a[band_mask == 0] = np.nan
-    band_b[band_mask == 0] = np.nan
-
-    col_a = np.nanmean(band_a, axis=0)
-    col_b = np.nanmean(band_b, axis=0)
-    valid = ~(np.isnan(col_a) | np.isnan(col_b))
-
-    if valid.sum() < 4:
-        return 0.0
-
-    ca  = col_a[valid]
-    cb  = col_b[valid]
-    mid = len(ca) // 2
-
-    da   = abs(float(np.nanmean(ca[:mid])) - float(np.nanmean(ca[mid:])))
-    db   = abs(float(np.nanmean(cb[:mid])) - float(np.nanmean(cb[mid:])))
-    disc = float(np.sqrt(da**2 + db**2))
-
-    # MOD 8 : bonus si raccord > 10
-    return round(min(disc, 15.0), 1)
+    zone_hsv  = hsv_img[yA:yB, xA:xB]
+    valid     = zone_hsv[zone_mask > 0]
+    if len(valid) < 80:
+        return None, 0
+    return np.array([
+        float(np.median(valid[:, 0])),
+        float(np.median(valid[:, 1])),
+        float(np.median(valid[:, 2]))
+    ]), len(valid)
 
 
 # =========================
@@ -268,9 +114,11 @@ def detect_car_orientation(car_crop):
 
     left_feux  = car_crop[feux_y1:feux_y2, 0:band_w]
     right_feux = car_crop[feux_y1:feux_y2, crop_w - band_w:crop_w]
-    left_hsv   = cv2.cvtColor(left_feux,  cv2.COLOR_BGR2HSV)
-    right_hsv  = cv2.cvtColor(right_feux, cv2.COLOR_BGR2HSV)
 
+    left_hsv  = cv2.cvtColor(left_feux,  cv2.COLOR_BGR2HSV)
+    right_hsv = cv2.cvtColor(right_feux, cv2.COLOR_BGR2HSV)
+
+    # Priorité 1 : feux rouges
     def count_red(hsv):
         m1 = cv2.inRange(hsv, (0,   60, 60), (12,  255, 255))
         m2 = cv2.inRange(hsv, (168, 60, 60), (180, 255, 255))
@@ -282,16 +130,17 @@ def detect_car_orientation(car_crop):
 
     if total_red > 150:
         if red_left > red_right * 1.35:
-            log.append("P1 ROUGE → avant DROITE")
+            log.append(f"P1 ROUGE: gauche={red_left} droite={red_right} → avant DROITE")
             return "right", log
         elif red_right > red_left * 1.35:
-            log.append("P1 ROUGE → avant GAUCHE")
+            log.append(f"P1 ROUGE: gauche={red_left} droite={red_right} → avant GAUCHE")
             return "left", log
         else:
-            log.append("P1 equilibre, passe P2")
+            log.append(f"P1 ROUGE: equilibre ({red_left}/{red_right}), passe P2")
     else:
-        log.append(f"P1 insuffisant ({total_red}px), passe P2")
+        log.append(f"P1 ROUGE: insuffisant ({total_red}px), passe P2")
 
+    # Priorité 2 : phares blancs/jaunes
     def count_headlight(hsv):
         white  = cv2.inRange(hsv, (0,  0,  170), (180, 90,  255))
         yellow = cv2.inRange(hsv, (15, 40, 170), (40,  220, 255))
@@ -303,35 +152,37 @@ def detect_car_orientation(car_crop):
 
     if total_light > 100:
         if light_left > light_right * 1.35:
-            log.append("P2 PHARE → avant GAUCHE")
+            log.append(f"P2 PHARE: gauche={light_left} droite={light_right} → avant GAUCHE")
             return "left", log
         elif light_right > light_left * 1.35:
-            log.append("P2 PHARE → avant DROITE")
+            log.append(f"P2 PHARE: gauche={light_left} droite={light_right} → avant DROITE")
             return "right", log
         else:
-            log.append("P2 equilibre, passe P3")
+            log.append(f"P2 PHARE: equilibre ({light_left}/{light_right}), passe P3")
     else:
-        log.append("P2 insuffisant, passe P3")
+        log.append(f"P2 PHARE: insuffisant ({total_light}px), passe P3")
 
-    gray        = cv2.cvtColor(car_crop, cv2.COLOR_BGR2GRAY)
-    vit_y1      = int(crop_h * 0.08)
-    vit_y2      = int(crop_h * 0.58)
-    vitre       = gray[vit_y1:vit_y2, :]
-    dark        = (vitre < 90).astype(np.uint8)
-    dark_f      = cv2.GaussianBlur(dark.astype(np.float32), (15, 15), 0)
-    mid         = crop_w // 2
+    # Priorité 3 : taille pare-brise
+    gray       = cv2.cvtColor(car_crop, cv2.COLOR_BGR2GRAY)
+    vit_y1     = int(crop_h * 0.08)
+    vit_y2     = int(crop_h * 0.58)
+    vitre      = gray[vit_y1:vit_y2, :]
+    dark       = (vitre < 90).astype(np.uint8)
+    dark_f     = cv2.GaussianBlur(dark.astype(np.float32), (15, 15), 0)
+    mid        = crop_w // 2
     left_glass  = float(dark_f[:, :mid].sum())
     right_glass = float(dark_f[:, mid:].sum())
 
     log.append(f"P3 VITRE: gauche={int(left_glass)} droite={int(right_glass)}")
 
     if left_glass > right_glass * 1.15:
-        log.append("P3 VITRE → avant GAUCHE")
+        log.append("P3 VITRE: plus grand gauche → avant GAUCHE")
         return "left", log
     elif right_glass > left_glass * 1.15:
-        log.append("P3 VITRE → avant DROITE")
+        log.append("P3 VITRE: plus grand droite → avant DROITE")
         return "right", log
 
+    # Fallback Sobel
     left_band  = car_crop[feux_y1:feux_y2, 0:band_w]
     right_band = car_crop[feux_y1:feux_y2, crop_w - band_w:crop_w]
     lg = cv2.cvtColor(left_band,  cv2.COLOR_BGR2GRAY)
@@ -340,10 +191,10 @@ def detect_car_orientation(car_crop):
     rs = float(np.mean(np.abs(cv2.Sobel(rg, cv2.CV_64F, 1, 1, ksize=3))))
 
     if rs > ls * 1.2:
-        log.append("FALLBACK Sobel → avant GAUCHE")
+        log.append(f"FALLBACK Sobel: droite>{ls:.1f} → avant GAUCHE")
         return "left", log
     else:
-        log.append("FALLBACK Sobel → avant DROITE")
+        log.append(f"FALLBACK Sobel: gauche>={rs:.1f} → avant DROITE")
         return "right", log
 
 
@@ -361,22 +212,34 @@ def analyse():
         path     = os.path.join(UPLOAD_FOLDER, filename)
         file.save(path)
 
+        # ===============================================
+        # LIRE IMAGE ORIGINALE — on garde sa résolution
+        # ===============================================
         img_orig = cv2.imread(path)
         if img_orig is None:
             return jsonify({"error": "image unreadable"}), 400
 
         orig_h, orig_w = img_orig.shape[:2]
 
+        # ===============================================
+        # YOLO reçoit une version réduite 900x500
+        # pour que les coords matchent facilement
+        # ===============================================
         img_yolo     = cv2.resize(img_orig, (YOLO_W, YOLO_H))
         resized_path = os.path.join(UPLOAD_FOLDER, "resized_" + filename)
         cv2.imwrite(resized_path, img_yolo)
-        yolo_result  = call_yolo(resized_path)
+
+        yolo_result = call_yolo(resized_path)
 
         detections = yolo_result.get("detections", [])
         cars = [d for d in detections if d.get("class") == 2]
         if not cars:
             return jsonify({"error": "Car not detected"}), 400
 
+        # ===============================================
+        # COORDONNÉES YOLO sur 900x500
+        # → on les rescale sur la résolution originale
+        # ===============================================
         scale_x = orig_w / YOLO_W
         scale_y = orig_h / YOLO_H
 
@@ -385,16 +248,20 @@ def analyse():
         raw_x2 = int(max(d["box"][2] for d in cars) * scale_x)
         raw_y2 = int(max(d["box"][3] for d in cars) * scale_y)
 
+        # Padding proportionnel à la résolution originale
         pad_x = int(15 * scale_x)
         pad_y = int(10 * scale_y)
         thr_x = int(150 * scale_x)
         thr_y = int(80  * scale_y)
 
-        x1 = 0      if raw_x1 < thr_x            else max(0,      raw_x1 - pad_x)
-        x2 = orig_w if (orig_w - raw_x2) < thr_x else min(orig_w, raw_x2 + pad_x)
-        y1 = 0      if raw_y1 < thr_y            else max(0,      raw_y1 - pad_y)
-        y2 = orig_h if (orig_h - raw_y2) < thr_y else min(orig_h, raw_y2 + pad_y)
+        x1 = 0       if raw_x1 < thr_x             else max(0,      raw_x1 - pad_x)
+        x2 = orig_w  if (orig_w - raw_x2) < thr_x  else min(orig_w, raw_x2 + pad_x)
+        y1 = 0       if raw_y1 < thr_y             else max(0,      raw_y1 - pad_y)
+        y2 = orig_h  if (orig_h - raw_y2) < thr_y  else min(orig_h, raw_y2 + pad_y)
 
+        # ===============================================
+        # AFFINER LE CROP sur l'image originale
+        # ===============================================
         x1, y1, x2, y2 = refine_car_bbox(img_orig, x1, y1, x2, y2)
 
         car_crop = img_orig[y1:y2, x1:x2]
@@ -403,84 +270,75 @@ def analyse():
 
         crop_h, crop_w = car_crop.shape[:2]
 
+        # ===============================================
+        # ORIENTATION
+        # ===============================================
         orientation, orient_log = detect_car_orientation(car_crop)
 
+        if orientation == "left":
+            zone_names = ["Avant", "Portes", "Arriere"]
+        else:
+            zone_names = ["Arriere", "Portes", "Avant"]
+
         # ===============================================
-        # MOD 1 : LAB + GRAY au lieu de HSV seul
+        # MASQUE CARROSSERIE
         # ===============================================
         hsv_full  = cv2.cvtColor(car_crop, cv2.COLOR_BGR2HSV)
-        lab_full  = cv2.cvtColor(car_crop, cv2.COLOR_BGR2LAB)
-        gray_full = cv2.cvtColor(car_crop, cv2.COLOR_BGR2GRAY)
+        mask_dark = cv2.inRange(hsv_full, (0, 0, 0),   (180, 255, 45))
+        mask_sky  = cv2.inRange(hsv_full, (0, 0, 210), (180, 18, 255))
+        mask_body = cv2.bitwise_not(cv2.bitwise_or(mask_dark, mask_sky))
+        kernel    = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        mask_body = cv2.morphologyEx(mask_body, cv2.MORPH_CLOSE, kernel)
 
         # ===============================================
-        # MOD 9 : MASQUE CARROSSERIE AMÉLIORÉ
+        # MOYENNE GLOBALE
         # ===============================================
-        mask_body = build_body_mask(car_crop, hsv_full)
-
-        # ===============================================
-        # RÉFÉRENCE GLOBALE en LAB
-        # ===============================================
-        ref_f = get_zone_features(
-            lab_full, gray_full, mask_body,
-            0, 0, crop_w, crop_h
-        )
-        if ref_f is None:
+        all_valid = hsv_full[mask_body > 0]
+        if len(all_valid) < 100:
             return jsonify({"error": "No body pixels found"}), 400
 
+        ref_color = np.array([
+            float(np.median(all_valid[:, 0])),
+            float(np.median(all_valid[:, 1])),
+            float(np.median(all_valid[:, 2]))
+        ])
+
         # ===============================================
-        # MOD 7 : 5 ZONES au lieu de 3
-        # Aile avant / Porte avant / Porte arrière /
-        # Aile arrière / (Pare-chocs intégré dans ailes)
+        # 3 ZONES — proportionnelles au vrai crop
         # ===============================================
         band_y1 = int(crop_h * 0.15)
         band_y2 = int(crop_h * 0.80)
-
-        cut1 = int(crop_w * 0.20)   # fin aile avant
-        cut2 = int(crop_w * 0.40)   # fin porte avant
-        cut3 = int(crop_w * 0.60)   # fin porte arrière
-        cut4 = int(crop_w * 0.80)   # fin aile arrière
-
-        if orientation == "left":
-            zone_names = [
-                "Aile avant",
-                "Porte avant",
-                "Porte arriere",
-                "Aile arriere",
-                "Pare-chocs arr"
-            ]
-        else:
-            zone_names = [
-                "Pare-chocs arr",
-                "Aile arriere",
-                "Porte arriere",
-                "Porte avant",
-                "Aile avant"
-            ]
+        cut1    = int(crop_w * 0.33)
+        cut2    = int(crop_w * 0.67)
 
         zones = [
             {"name": zone_names[0], "xA": 0,    "xB": cut1,   "yA": band_y1, "yB": band_y2},
             {"name": zone_names[1], "xA": cut1, "xB": cut2,   "yA": band_y1, "yB": band_y2},
-            {"name": zone_names[2], "xA": cut2, "xB": cut3,   "yA": band_y1, "yB": band_y2},
-            {"name": zone_names[3], "xA": cut3, "xB": cut4,   "yA": band_y1, "yB": band_y2},
-            {"name": zone_names[4], "xA": cut4, "xB": crop_w, "yA": band_y1, "yB": band_y2},
+            {"name": zone_names[2], "xA": cut2, "xB": crop_w, "yA": band_y1, "yB": band_y2},
         ]
 
         # ===============================================
-        # DESSIN
+        # DESSIN sur l'image ORIGINALE haute résolution
         # ===============================================
-        final_img      = img_orig.copy()
-        thick_box      = max(3, int(5 * min(scale_x, scale_y)))
-        thick_line     = max(1, int(1 * min(scale_x, scale_y)))
-        font_scale_big = max(0.5, 0.55 * min(scale_x, scale_y))
-        font_scale_med = max(0.4, 0.45 * min(scale_x, scale_y))
-        font_thick_big = max(2,   int(2  * min(scale_x, scale_y)))
-        overlay_h      = max(55,  int(55 * scale_y))
+        final_img = img_orig.copy()
 
+        # Épaisseur des traits proportionnelle à la résolution
+        thick_box  = max(3, int(5  * min(scale_x, scale_y)))
+        thick_line = max(1, int(1  * min(scale_x, scale_y)))
+        font_scale_big  = max(0.6, 0.6  * min(scale_x, scale_y))
+        font_scale_med  = max(0.5, 0.5  * min(scale_x, scale_y))
+        font_scale_ref  = max(0.4, 0.38 * min(scale_x, scale_y))
+        font_thick_big  = max(2, int(2  * min(scale_x, scale_y)))
+        font_thick_small= max(1, int(1  * min(scale_x, scale_y)))
+        overlay_h       = max(55, int(55 * scale_y))
+
+        # Contour total voiture
         cv2.rectangle(final_img, (x1, y1), (x2, y2), (220, 220, 220), thick_line)
 
-        step = max(10, int(12 * scale_y))
-        dash = max(4,  int(6  * scale_y))
-        for cut in [cut1, cut2, cut3, cut4]:
+        # Séparateurs pointillés
+        step  = max(10, int(12 * scale_y))
+        dash  = max(4,  int(6  * scale_y))
+        for cut in [cut1, cut2]:
             for dy in range(band_y1, band_y2, step):
                 cv2.line(
                     final_img,
@@ -496,10 +354,8 @@ def analyse():
             xA, xB = zone["xA"], zone["xB"]
             yA, yB = zone["yA"], zone["yB"]
 
-            # MOD 1+2+3 : features LAB + texture + brillance
-            z_f = get_zone_features(
-                lab_full, gray_full, mask_body,
-                xA, yA, xB, yB
+            zone_color, px_count = get_zone_color(
+                hsv_full, mask_body, xA, yA, xB, yB
             )
 
             abs_x1 = x1 + xA
@@ -507,57 +363,27 @@ def analyse():
             abs_x2 = x1 + xB
             abs_y2 = y1 + yB
 
-            if z_f is None:
-                color_rect       = (150, 150, 150)
-                label_score      = "N/A"
-                final_score_zone = 0.0
-                verdict          = "Non analysable"
-                detail           = {}
+            if zone_color is None:
+                color_rect  = (150, 150, 150)
+                label_score = "N/A"
+                diff        = 0.0
+                verdict     = "Non analysable"
             else:
-                # MOD 4 : score combiné
-                sc = compute_score(z_f, ref_f)
+                diff = float(np.linalg.norm(zone_color - ref_color))
 
-                # MOD 6 : cohérence interne bandes
-                bonus_coh, is_coh = check_internal_coherence(
-                    lab_full, gray_full, mask_body,
-                    xA, yA, xB, yB, ref_f
-                )
-
-                # MOD 8 : raccords aux bords
-                disc_left  = detect_border_discontinuity(
-                    lab_full, mask_body, xA, yA, yB
-                ) if xA > 0 else 0.0
-                disc_right = detect_border_discontinuity(
-                    lab_full, mask_body, xB, yA, yB
-                ) if xB < crop_w else 0.0
-                disc_bonus = round(min((disc_left + disc_right) / 2.0, 15.0), 1)
-
-                final_score_zone = round(
-                    sc["score"] + bonus_coh + disc_bonus, 1
-                )
-                label_score = str(int(final_score_zone))
-
-                detail = {
-                    "delta_e":       sc["delta_e"],
-                    "delta_tex":     sc["delta_tex"],
-                    "delta_bril":    sc["delta_bril"],
-                    "bonus_coherence": round(bonus_coh, 1),
-                    "bonus_raccord":   disc_bonus,
-                    "zone_coherente":  is_coh
-                }
-
-                # Seuils
-                if final_score_zone >= 20 and final_score_zone < 40:
+                if diff >= 14 and diff < 26:
                     color_rect = (0, 0, 255)
                     verdict    = "Attention peinture refaite!"
-                    detected  += 1
-                elif final_score_zone < 20:
+                elif diff < 14:
                     color_rect = (0, 165, 255)
                     verdict    = "Legere variation suspecte!"
                     detected  += 1
                 else:
                     color_rect = (0, 210, 0)
                     verdict    = "OK"
+                    detected  += 1
+
+                label_score = str(int(diff))
 
             cv2.rectangle(final_img, (abs_x1, abs_y1),
                           (abs_x2, abs_y2), color_rect, thick_box)
@@ -568,44 +394,47 @@ def analyse():
             cv2.addWeighted(overlay, 0.5, final_img, 0.5, 0, final_img)
 
             cv2.putText(final_img, zone["name"],
-                        (abs_x1 + 6, abs_y1 + int(overlay_h * 0.40)),
+                        (abs_x1 + 8, abs_y1 + int(overlay_h * 0.40)),
                         cv2.FONT_HERSHEY_SIMPLEX,
                         font_scale_big, (255, 255, 255), font_thick_big)
 
-            cv2.putText(final_img, f"Score: {label_score}",
-                        (abs_x1 + 6, abs_y1 + int(overlay_h * 0.80)),
+            cv2.putText(final_img, f"Ecart: {label_score}",
+                        (abs_x1 + 8, abs_y1 + int(overlay_h * 0.80)),
                         cv2.FONT_HERSHEY_SIMPLEX,
                         font_scale_med, color_rect, font_thick_big)
 
             cv2.putText(final_img, verdict,
-                        (abs_x1 + 6, abs_y2 - int(10 * scale_y)),
+                        (abs_x1 + 8, abs_y2 - int(10 * scale_y)),
                         cv2.FONT_HERSHEY_SIMPLEX,
                         font_scale_med, color_rect, font_thick_big)
 
             results_zones.append({
                 "zone":    zone["name"],
-                "score":   final_score_zone,
-                "pixels":  z_f["count"] if z_f else 0,
-                "verdict": verdict,
-                "detail":  detail
+                "diff":    round(diff, 1),
+                "pixels":  px_count,
+                "verdict": verdict
             })
 
         # ===============================================
         # SCORE GLOBAL
         # ===============================================
-        scores = [z["score"] for z in results_zones if z["score"] > 0]
-        final_score = int(np.mean(scores)) if scores else 0
+        diffs = [z["diff"] for z in results_zones if z["diff"] > 0]
+        final_score = int(np.mean(diffs)) if diffs else 0
         final_score = min(final_score, 100)
 
-        if final_score < 15:
+        if final_score < 10:
             result = "Peinture homogene (OK)"
-        elif final_score < 30:
+        elif final_score < 28:
             result = "Legeres variations detectees"
         else:
             result = "Difference importante — repeinture probable"
 
+        
+
         analysed_name = "analysed_" + filename
         analysed_path = os.path.join(UPLOAD_FOLDER, analysed_name)
+
+        # Sauvegarde en qualité originale
         cv2.imwrite(analysed_path, final_img)
 
         if os.path.exists(resized_path):
@@ -620,12 +449,10 @@ def analyse():
             "orientation":     orientation,
             "orientation_log": orient_log,
             "image_size":      {"width": orig_w, "height": orig_h},
-            "reference_lab": {
-                "L": round(float(ref_f["lab"][0]), 1),
-                "a": round(float(ref_f["lab"][1]), 1),
-                "b": round(float(ref_f["lab"][2]), 1),
-                "texture":   round(ref_f["texture"],   1),
-                "brillance": round(ref_f["brillance"],  1)
+            "reference_hsv": {
+                "H": round(ref_color[0], 1),
+                "S": round(ref_color[1], 1),
+                "V": round(ref_color[2], 1)
             },
             "image_result":    analysed_name,
             "image_url":       request.host_url + "uploads/" + analysed_name
