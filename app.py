@@ -371,14 +371,14 @@ def analyse():
             else:
                 diff = float(np.linalg.norm(zone_color - ref_color))
 
-                if diff >= 10 and diff < 26:
+                if diff >= 10 and diff < 16:
                     color_rect = (0, 0, 255)
                     verdict    = "Attention peinture refaite!"
                 elif diff <10:
                     color_rect = (0, 165, 255)
                     verdict    = "Legere variation suspecte!"
                     detected  += 1
-                else: diff >= 26:
+                else: 
                     color_rect = (0, 210, 0)
                     verdict    = "OK"
                     detected  += 1
