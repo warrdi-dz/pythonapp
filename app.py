@@ -59,19 +59,7 @@ def get_zone_color(hsv_img, mask, xA, yA, xB, yB):
         float(np.median(valid[:, 1])),
         float(np.median(valid[:, 2]))
     ]), len(valid)
-def get_zone_lab(lab_img, mask, xA, yA, xB, yB):
-    zone_mask = mask[yA:yB, xA:xB]
-    zone_lab  = lab_img[yA:yB, xA:xB]
 
-    valid = zone_lab[zone_mask > 0]
-
-    if len(valid) < 80:
-        return None
-
-    return np.array([
-        float(np.median(valid[:,1])),  # canal a
-        float(np.median(valid[:,2]))   # canal b
-    ])
 
 # =========================
 # AFFINER LE CROP
@@ -296,13 +284,12 @@ def analyse():
         # MASQUE CARROSSERIE
         # ===============================================
         hsv_full  = cv2.cvtColor(car_crop, cv2.COLOR_BGR2HSV)
-        lab_full = cv2.cvtColor(car_crop, cv2.COLOR_BGR2LAB)
         mask_dark = cv2.inRange(hsv_full, (0, 0, 0),   (180, 255, 45))
         mask_sky  = cv2.inRange(hsv_full, (0, 0, 210), (180, 18, 255))
         mask_body = cv2.bitwise_not(cv2.bitwise_or(mask_dark, mask_sky))
         kernel    = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
         mask_body = cv2.morphologyEx(mask_body, cv2.MORPH_CLOSE, kernel)
-        
+
         # ===============================================
         # MOYENNE GLOBALE
         # ===============================================
@@ -315,11 +302,7 @@ def analyse():
             float(np.median(all_valid[:, 1])),
             float(np.median(all_valid[:, 2]))
         ])
-        ref_lab = get_zone_lab(
-            lab_full,
-            mask_body,
-            0, 0, crop_w, crop_h
-        )
+
         # ===============================================
         # 3 ZONES — proportionnelles au vrai crop
         # ===============================================
@@ -368,20 +351,11 @@ def analyse():
         detected = 0
 
         for zone in zones:
-
             xA, xB = zone["xA"], zone["xB"]
             yA, yB = zone["yA"], zone["yB"]
 
             zone_color, px_count = get_zone_color(
-                hsv_full,
-                mask_body,
-                xA, yA, xB, yB
-            )
-
-            zone_lab = get_zone_lab(
-                lab_full,
-                mask_body,
-                xA, yA, xB, yB
+                hsv_full, mask_body, xA, yA, xB, yB
             )
 
             abs_x1 = x1 + xA
@@ -390,121 +364,57 @@ def analyse():
             abs_y2 = y1 + yB
 
             if zone_color is None:
-
-                color_rect = (150, 150, 150)
-                diff = 0.0
-                verdict = "Non analysable"
+                color_rect  = (150, 150, 150)
                 label_score = "N/A"
-
+                diff        = 0.0
+                verdict     = "Non analysable"
             else:
+                diff = float(np.linalg.norm(zone_color - ref_color))
 
-                if zone_lab is None or ref_lab is None:
-
-                    diff = float(
-                        np.linalg.norm(
-                            zone_color - ref_color
-                        )
-                    )
-
-                else:
-
-                    diff_hsv = float(
-                        np.linalg.norm(
-                            zone_color - ref_color
-                        )
-                    )
-
-                    diff_lab = float(
-                        np.linalg.norm(
-                            zone_lab - ref_lab
-                        )
-                    )
-
-                    diff = diff_hsv * 0.4 + diff_lab * 0.6
-
-                if diff >= 26:
-
+                if diff >= 14 and diff < 26:
                     color_rect = (0, 0, 255)
-                    verdict = "Attention peinture refaite !"
-                    detected += 1
-
-                elif diff >= 12:
-
+                    verdict    = "Attention peinture refaite!"
+                elif diff < 14:
                     color_rect = (0, 165, 255)
-                    verdict = "Legere variation suspecte !"
-                    detected += 1
-
+                    verdict    = "Legere variation suspecte!"
+                    detected  += 1
                 else:
-
                     color_rect = (0, 210, 0)
-                    verdict = "OK"
+                    verdict    = "OK"
+                    detected  += 1
 
                 label_score = str(int(diff))
 
-            cv2.rectangle(
-                final_img,
-                (abs_x1, abs_y1),
-                (abs_x2, abs_y2),
-                color_rect,
-                thick_box
-            )
+            cv2.rectangle(final_img, (abs_x1, abs_y1),
+                          (abs_x2, abs_y2), color_rect, thick_box)
 
             overlay = final_img.copy()
+            cv2.rectangle(overlay, (abs_x1, abs_y1),
+                          (abs_x2, abs_y1 + overlay_h), (0, 0, 0), -1)
+            cv2.addWeighted(overlay, 0.5, final_img, 0.5, 0, final_img)
 
-            cv2.rectangle(
-                overlay,
-                (abs_x1, abs_y1),
-                (abs_x2, abs_y1 + overlay_h),
-                (0, 0, 0),
-                -1
-            )
+            cv2.putText(final_img, zone["name"],
+                        (abs_x1 + 8, abs_y1 + int(overlay_h * 0.40)),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        font_scale_big, (255, 255, 255), font_thick_big)
 
-            cv2.addWeighted(
-                overlay,
-                0.5,
-                final_img,
-                0.5,
-                0,
-                final_img
-            )
+            cv2.putText(final_img, f"Ecart: {label_score}",
+                        (abs_x1 + 8, abs_y1 + int(overlay_h * 0.80)),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        font_scale_med, color_rect, font_thick_big)
 
-            cv2.putText(
-                final_img,
-                zone["name"],
-                (abs_x1 + 8, abs_y1 + int(overlay_h * 0.40)),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                font_scale_big,
-                (255, 255, 255),
-                font_thick_big
-            )
-
-            cv2.putText(
-                final_img,
-                f"Ecart: {label_score}",
-                (abs_x1 + 8, abs_y1 + int(overlay_h * 0.80)),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                font_scale_med,
-                color_rect,
-                font_thick_big
-            )
-
-            cv2.putText(
-                final_img,
-                verdict,
-                (abs_x1 + 8, abs_y2 - int(10 * scale_y)),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                font_scale_med,
-                color_rect,
-                font_thick_big
-            )
+            cv2.putText(final_img, verdict,
+                        (abs_x1 + 8, abs_y2 - int(10 * scale_y)),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        font_scale_med, color_rect, font_thick_big)
 
             results_zones.append({
-                "zone": zone["name"],
-                "diff": round(diff, 1),
-                "pixels": px_count,
+                "zone":    zone["name"],
+                "diff":    round(diff, 1),
+                "pixels":  px_count,
                 "verdict": verdict
             })
-     
+
         # ===============================================
         # SCORE GLOBAL
         # ===============================================
