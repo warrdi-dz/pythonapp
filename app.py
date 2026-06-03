@@ -40,60 +40,50 @@ def home():
 
 
 # =============================================
-# MASQUE CARROSSERIE STRICT
-# Exclure : vitres, roues, reflets, ombres,
-# taches noires, plastique, chrome, ciel
+# MASQUE CARROSSERIE
+# Exclut : vitres, roues, reflets blancs forts,
+# ombres noires, plastique, chrome, ciel
 # =============================================
 def build_body_mask(car_crop, hsv):
     # Trop sombre = vitres, pneus, taches noires
-    mask_dark = cv2.inRange(hsv, (0, 0, 0), (180, 255, 40))
+    mask_dark   = cv2.inRange(hsv, (0, 0,   0), (180, 255,  40))
+    # Reflets blancs très forts = soleil sur carrosserie
+    mask_reflet = cv2.inRange(hsv, (0, 0, 215), (180, 255, 255))
+    # Ciel / fond blanc
+    mask_sky    = cv2.inRange(hsv, (0, 0, 210), (180,  20, 255))
+    # Faible saturation = plastique, chrome, calandre
+    mask_chrome = cv2.inRange(hsv, (0, 0,   0), (180,  28, 255))
 
-    # Reflets et surexposition = soleil, chrome brillant
-    mask_reflet = cv2.inRange(hsv, (0, 0, 220), (180, 255, 255))
-
-    # Ciel / fond blanc désaturé
-    mask_sky = cv2.inRange(hsv, (0, 0, 210), (180, 20, 255))
-
-    # Faible saturation = plastique, chrome mat, calandre
-    mask_chrome = cv2.inRange(hsv, (0, 0, 0), (180, 30, 255))
-
-    # Ombres très sombres (V < 35)
-    mask_shadow = cv2.inRange(hsv, (0, 0, 0), (180, 255, 35))
-
-    # Combiner toutes les exclusions
     exclude   = cv2.bitwise_or(mask_dark,   mask_reflet)
     exclude   = cv2.bitwise_or(exclude,     mask_sky)
     exclude   = cv2.bitwise_or(exclude,     mask_chrome)
-    exclude   = cv2.bitwise_or(exclude,     mask_shadow)
     mask_body = cv2.bitwise_not(exclude)
 
-    # Morphologie pour nettoyer
     k         = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
     mask_body = cv2.morphologyEx(mask_body, cv2.MORPH_CLOSE, k, iterations=2)
     mask_body = cv2.morphologyEx(mask_body, cv2.MORPH_OPEN,  k, iterations=1)
-
     return mask_body
 
 
 # =============================================
-# COULEUR LAB MÉDIANE (anti-reflets, anti-ombre)
-# On utilise LAB et on exclut les pixels extrêmes
+# COULEUR LAB MÉDIANE ANTI-REFLETS
+# Exclut les 10% extrêmes de luminosité
+# pour éliminer reflets résiduels et ombres
 # =============================================
 def get_zone_color(lab_img, mask, xA, yA, xB, yB):
-    zone_mask = mask[yA:yB, xA:xB]
-    zone_lab  = lab_img[yA:yB, xA:xB]
-    valid     = zone_lab[zone_mask > 0]
+    zm   = mask[yA:yB, xA:xB]
+    zl   = lab_img[yA:yB, xA:xB]
+    valid = zl[zm > 0]
 
     if len(valid) < 80:
         return None, 0
 
-    # Exclure les 10% extrêmes de luminosité
-    # pour éliminer les derniers reflets et ombres
-    L_vals  = valid[:, 0]
-    p10     = np.percentile(L_vals, 10)
-    p90     = np.percentile(L_vals, 90)
-    keep    = (L_vals >= p10) & (L_vals <= p90)
-    valid   = valid[keep]
+    # Exclure 10% plus sombres et 10% plus brillants
+    L     = valid[:, 0]
+    p10   = np.percentile(L, 10)
+    p90   = np.percentile(L, 90)
+    keep  = (L >= p10) & (L <= p90)
+    valid = valid[keep]
 
     if len(valid) < 50:
         return None, 0
@@ -106,16 +96,15 @@ def get_zone_color(lab_img, mask, xA, yA, xB, yB):
 
 
 # =============================================
-# DÉTECTER LA VUE + ÉLÉMENTS VISIBLES
-# Retourne : view_type, orientation, elements
+# DÉTECTER LA VUE + CE QUI EST VISIBLE
 #
-# view_type : "side" | "front" | "rear" |
-#             "front_3q" | "rear_3q"
-# elements  : liste des pièces détectées
-#             {"phares_av", "feux_ar",
-#              "calandre", "capot", "vitre_av"}
+# Retourne :
+#   view_type   : "side_full" | "front_only" |
+#                 "rear_only" | "rear_3q"
+#   orientation : "left" | "right" | "rear"
+#   info        : dict avec les comptages
 # =============================================
-def detect_view(car_crop, detections):
+def detect_view(car_crop):
     crop_h, crop_w = car_crop.shape[:2]
     hsv  = cv2.cvtColor(car_crop, cv2.COLOR_BGR2HSV)
     gray = cv2.cvtColor(car_crop, cv2.COLOR_BGR2GRAY)
@@ -123,247 +112,290 @@ def detect_view(car_crop, detections):
 
     ratio_wh = crop_w / max(crop_h, 1)
 
-    # --- Feux rouges (arrière) ---
-    mr1 = cv2.inRange(hsv, (0,   60, 60), (12,  255, 255))
-    mr2 = cv2.inRange(hsv, (168, 60, 60), (180, 255, 255))
-    mask_red   = cv2.bitwise_or(mr1, mr2)
-    red_total  = cv2.countNonZero(mask_red)
-    red_left   = cv2.countNonZero(mask_red[:, :crop_w//2])
-    red_right  = cv2.countNonZero(mask_red[:, crop_w//2:])
+    # --- Feux arrière rouges ---
+    mr1      = cv2.inRange(hsv, (0,   60, 60), (12,  255, 255))
+    mr2      = cv2.inRange(hsv, (168, 60, 60), (180, 255, 255))
+    mask_red = cv2.bitwise_or(mr1, mr2)
+    red_tot  = cv2.countNonZero(mask_red)
+    red_L    = cv2.countNonZero(mask_red[:, :crop_w//2])
+    red_R    = cv2.countNonZero(mask_red[:, crop_w//2:])
 
-    # --- Phares avant (blanc/jaune lumineux) ---
-    mw1 = cv2.inRange(hsv, (0,  0,  185), (180, 60, 255))
-    mw2 = cv2.inRange(hsv, (15, 40, 185), (40,  200, 255))
-    mask_white  = cv2.bitwise_or(mw1, mw2)
-    white_total = cv2.countNonZero(mask_white)
-    white_left  = cv2.countNonZero(mask_white[:, :crop_w//2])
-    white_right = cv2.countNonZero(mask_white[:, crop_w//2:])
+    # --- Phares avant blancs/jaunes ---
+    # On utilise un seuil plus strict pour éviter
+    # de confondre reflets carrosserie et vrais phares
+    mw1        = cv2.inRange(hsv, (0,  0,  195), (180, 50, 255))
+    mw2        = cv2.inRange(hsv, (15, 40, 195), (40, 180, 255))
+    mask_white = cv2.bitwise_or(mw1, mw2)
 
-    # --- Vitres (zones sombres dans la partie haute) ---
-    top = gray[int(crop_h*0.05):int(crop_h*0.55), :]
-    dk  = (top < 75).astype(np.uint8)
-    dk_f = cv2.GaussianBlur(dk.astype(np.float32), (15,15), 0)
-    dark_left  = float(dk_f[:, :crop_w//2].sum())
-    dark_right = float(dk_f[:, crop_w//2:].sum())
-    dark_total = dark_left + dark_right
+    # Chercher les phares dans la bande basse seulement
+    # (les phares sont dans le tiers bas de la voiture)
+    ph_zone     = mask_white[int(crop_h*0.45):, :]
+    white_tot   = cv2.countNonZero(ph_zone)
+    white_L     = cv2.countNonZero(ph_zone[:, :crop_w//2])
+    white_R     = cv2.countNonZero(ph_zone[:, crop_w//2:])
 
-    # --- Éléments détectés ---
-    elements = set()
-    if red_total   > 200: elements.add("feux_ar")
-    if white_total > 200: elements.add("phares_av")
-    if dark_total  > 5000: elements.add("vitre")
+    # --- Vitres (zones sombres partie haute) ---
+    top       = gray[int(crop_h*0.05):int(crop_h*0.55), :]
+    dk        = (top < 75).astype(np.uint8)
+    dk_f      = cv2.GaussianBlur(dk.astype(np.float32), (15, 15), 0)
+    glass_L   = float(dk_f[:, :crop_w//2].sum())
+    glass_R   = float(dk_f[:, crop_w//2:].sum())
+    glass_tot = glass_L + glass_R
 
-    log.append(f"rouge={red_total} blanc={white_total} vitres={int(dark_total)}")
-    log.append(f"ratio_wh={ratio_wh:.2f}")
+    # --- Présence de portes (vitres latérales longues) ---
+    has_doors = (glass_tot > 8000) and (ratio_wh > 1.3)
 
-    # =============================================
-    # RÈGLE 1 : VUE DE CÔTÉ
-    # ratio > 1.5 ET vitres présentes ET feux
-    # d'un seul côté
-    # =============================================
-    if ratio_wh > 1.5 and "vitre" in elements:
-        elements.add("porte")
-        elements.add("capot_lateral")
+    log.append(f"ratio={ratio_wh:.2f} rouge={red_tot} "
+               f"blanc={white_tot} vitres={int(glass_tot)} "
+               f"doors={has_doors}")
 
-        # Déterminer orientation via feux
-        if red_total > 200:
-            if red_left > red_right * 1.4:
-                log.append("SIDE: feux rouge gauche → avant DROITE")
-                return "side", "right", elements, log
-            elif red_right > red_left * 1.4:
-                log.append("SIDE: feux rouge droite → avant GAUCHE")
-                return "side", "left", elements, log
-
-        if white_total > 200:
-            if white_left > white_right * 1.4:
-                log.append("SIDE: phares gauche → avant GAUCHE")
-                return "side", "left", elements, log
-            elif white_right > white_left * 1.4:
-                log.append("SIDE: phares droite → avant DROITE")
-                return "side", "right", elements, log
-
-        # Pare-brise
-        if dark_left > dark_right * 1.2:
-            return "side", "left", elements, log
-        return "side", "right", elements, log
+    info = {
+        "red_tot": red_tot, "red_L": red_L, "red_R": red_R,
+        "white_tot": white_tot, "white_L": white_L, "white_R": white_R,
+        "glass_tot": glass_tot, "has_doors": has_doors,
+        "ratio_wh": ratio_wh
+    }
 
     # =============================================
-    # RÈGLE 2 : VUE DE FACE
-    # Phares des deux côtés + pas de feux rouges
+    # CAS 1 : VUE DE CÔTÉ COMPLÈTE
+    # ratio > 1.4 ET vitres latérales présentes
+    # → on voit les portes
     # =============================================
-    white_balanced = (white_left > 80 and white_right > 80 and
-                      max(white_left, white_right) < min(white_left, white_right) * 3.5)
+    if has_doors and ratio_wh > 1.4:
+        log.append("→ VUE COTE COMPLETE (portes visibles)")
 
-    if white_balanced and red_total < 100 and ratio_wh < 1.8:
-        elements.update({"phares_av", "capot", "parechoc_av"})
-        log.append("FRONT: phares des deux côtés")
-        return "front", "front", elements, log
+        # Orientation via feux rouges
+        if red_tot > 200:
+            if red_L > red_R * 1.4:
+                log.append("feux gauche → avant DROITE")
+                return "side_full", "right", info, log
+            elif red_R > red_L * 1.4:
+                log.append("feux droite → avant GAUCHE")
+                return "side_full", "left", info, log
+
+        # Orientation via phares
+        if white_tot > 150:
+            if white_L > white_R * 1.4:
+                log.append("phares gauche → avant GAUCHE")
+                return "side_full", "left", info, log
+            elif white_R > white_L * 1.4:
+                log.append("phares droite → avant DROITE")
+                return "side_full", "right", info, log
+
+        # Orientation via pare-brise
+        if glass_L > glass_R * 1.2:
+            return "side_full", "left", info, log
+        return "side_full", "right", info, log
 
     # =============================================
-    # RÈGLE 3 : VUE DE DERRIÈRE
-    # Feux rouges des deux côtés + pas de phares
+    # CAS 2 : VUE AVANT SEULEMENT
+    # Phares visibles + pas de feux rouges significatifs
+    # + pas de portes (ratio < 1.5 ou vitres courtes)
     # =============================================
-    red_balanced = (red_left > 80 and red_right > 80 and
-                    max(red_left, red_right) < min(red_left, red_right) * 3.5)
-
-    if red_balanced and white_total < 100 and ratio_wh < 1.8:
-        elements.update({"feux_ar", "coffre", "parechoc_ar"})
-        log.append("REAR: feux rouges des deux côtés")
-        return "rear", "rear", elements, log
-
-    # =============================================
-    # RÈGLE 4 : 3/4 AVANT
-    # Phares visibles d'un côté, pas de vitres longues
-    # =============================================
-    if white_total > 150 and red_total < 80 and ratio_wh < 1.6:
-        elements.update({"phares_av", "capot", "parechoc_av", "aile_av"})
-        if white_left > white_right:
-            log.append("FRONT_3Q: phares à gauche → avant GAUCHE")
-            return "front_3q", "left", elements, log
+    if white_tot > 120 and red_tot < 150 and not has_doors:
+        log.append("→ VUE AVANT SEULMENT (capot + phares + aile)")
+        if white_L > white_R:
+            return "front_only", "left", info, log
         else:
-            log.append("FRONT_3Q: phares à droite → avant DROITE")
-            return "front_3q", "right", elements, log
+            return "front_only", "right", info, log
 
     # =============================================
-    # RÈGLE 5 : 3/4 ARRIÈRE
-    # Feux rouges d'un côté, pas de vitres longues
+    # CAS 3 : VUE ARRIÈRE SEULEMENT
+    # Feux rouges visibles + pas de phares + pas de portes
     # =============================================
-    if red_total > 150 and white_total < 80 and ratio_wh < 1.6:
-        elements.update({"feux_ar", "coffre", "parechoc_ar", "aile_ar"})
-        if red_left > red_right:
-            log.append("REAR_3Q: feux à gauche → avant DROITE")
-            return "rear_3q", "right", elements, log
+    if red_tot > 150 and white_tot < 100 and not has_doors:
+        log.append("→ VUE ARRIERE SEULMENT (coffre + feux + aile arr)")
+        if red_L > red_R:
+            return "rear_only", "left", info, log
         else:
-            log.append("REAR_3Q: feux à droite → avant GAUCHE")
-            return "rear_3q", "left", elements, log
+            return "rear_only", "right", info, log
 
-    # Fallback vue de côté
-    elements.update({"porte", "capot_lateral"})
-    log.append("FALLBACK: side par défaut")
-    return "side", "left", elements, log
+    # =============================================
+    # CAS 4 : 3/4 ARRIÈRE
+    # Feux rouges + quelques vitres mais pas de portes longues
+    # =============================================
+    if red_tot > 100 and ratio_wh < 1.5:
+        log.append("→ VUE 3/4 ARRIERE")
+        if red_L > red_R:
+            return "rear_3q", "left", info, log
+        return "rear_3q", "right", info, log
+
+    # Fallback côté
+    log.append("→ FALLBACK: side_full")
+    return "side_full", "left", info, log
 
 
 # =============================================
-# DÉFINIR LES ZONES SELON LA VUE ET ÉLÉMENTS
-# Zones nommées d'après les vraies pièces
-# visibles dans l'image
+# DÉFINIR LES ZONES SELON LA VUE
+#
+# CAS 1 — CÔTÉ COMPLET :
+#   Aile avant | Portes | Aile arrière
+#
+# CAS 2 — AVANT SEULEMENT :
+#   Capot avant | Aile avant | Pare-chocs av.
+#   Les zones suivent la géométrie réelle :
+#   - Capot = partie haute centrale
+#   - Aile  = partie latérale (côté phares)
+#   - Pare-chocs = partie basse
+#
+# CAS 3 — ARRIÈRE SEULEMENT :
+#   Coffre/hayon | Aile arrière | Pare-chocs arr.
+#
+# CAS 4 — 3/4 ARRIÈRE :
+#   Coffre | Aile arrière | Pare-chocs arr.
 # =============================================
-def define_zones(view_type, orientation, crop_h, crop_w, elements):
-    band_y1 = int(crop_h * 0.10)
-    band_y2 = int(crop_h * 0.88)
+def define_zones(view_type, orientation, crop_h, crop_w):
 
-    # -----------------------------------------------
-    # VUE DE CÔTÉ : Aile avant / Portes / Aile arrière
-    # -----------------------------------------------
-    if view_type == "side":
+    # Bande verticale carrosserie (exclut toit et bas)
+    band_y1 = int(crop_h * 0.08)
+    band_y2 = int(crop_h * 0.90)
+
+    # --------------------------------------------------
+    # CAS 1 : VUE DE CÔTÉ COMPLÈTE
+    # --------------------------------------------------
+    if view_type == "side_full":
         cut1 = int(crop_w * 0.25)
         cut2 = int(crop_w * 0.65)
 
         if orientation == "left":
             return [
-                {"name": "Aile avant",   "xA": 0,    "xB": cut1,   "yA": band_y1, "yB": band_y2},
-                {"name": "Portes",       "xA": cut1, "xB": cut2,   "yA": band_y1, "yB": band_y2},
-                {"name": "Aile arriere", "xA": cut2, "xB": crop_w, "yA": band_y1, "yB": band_y2},
+                {"name": "Aile avant",   "xA": 0,    "xB": cut1,
+                 "yA": band_y1, "yB": band_y2},
+                {"name": "Portes",       "xA": cut1, "xB": cut2,
+                 "yA": band_y1, "yB": band_y2},
+                {"name": "Aile arriere", "xA": cut2, "xB": crop_w,
+                 "yA": band_y1, "yB": band_y2},
             ]
         else:
             return [
-                {"name": "Aile arriere", "xA": 0,    "xB": cut1,   "yA": band_y1, "yB": band_y2},
-                {"name": "Portes",       "xA": cut1, "xB": cut2,   "yA": band_y1, "yB": band_y2},
-                {"name": "Aile avant",   "xA": cut2, "xB": crop_w, "yA": band_y1, "yB": band_y2},
+                {"name": "Aile arriere", "xA": 0,    "xB": cut1,
+                 "yA": band_y1, "yB": band_y2},
+                {"name": "Portes",       "xA": cut1, "xB": cut2,
+                 "yA": band_y1, "yB": band_y2},
+                {"name": "Aile avant",   "xA": cut2, "xB": crop_w,
+                 "yA": band_y1, "yB": band_y2},
             ]
 
-    # -----------------------------------------------
-    # VUE DE FACE : Aile gauche / Capot / Aile droite
-    # + Pare-chocs avant en bas
-    # -----------------------------------------------
-    elif view_type == "front":
-        cut1      = int(crop_w * 0.22)
-        cut2      = int(crop_w * 0.78)
-        capot_y2  = int(crop_h * 0.52)
-        pc_y1     = int(crop_h * 0.60)
+    # --------------------------------------------------
+    # CAS 2 : VUE AVANT SEULEMENT
+    # Capot = bande haute (y: 8% → 50%)
+    # Aile  = côté latéral où sont les phares
+    # Pare-chocs = bande basse (y: 60% → 90%)
+    # --------------------------------------------------
+    elif view_type == "front_only":
+        capot_y1    = int(crop_h * 0.08)
+        capot_y2    = int(crop_h * 0.52)
+        parechoc_y1 = int(crop_h * 0.60)
+        parechoc_y2 = int(crop_h * 0.92)
 
-        return [
-            {"name": "Aile av. gauche", "xA": 0,    "xB": cut1,   "yA": band_y1, "yB": band_y2},
-            {"name": "Capot",           "xA": cut1, "xB": cut2,   "yA": band_y1, "yB": capot_y2},
-            {"name": "Pare-chocs av.",  "xA": cut1, "xB": cut2,   "yA": pc_y1,   "yB": band_y2},
-            {"name": "Aile av. droite", "xA": cut2, "xB": crop_w, "yA": band_y1, "yB": band_y2},
-        ]
+        # L'aile avant est du côté des phares
+        # Le capot occupe la partie centrale haute
+        if orientation == "left":
+            # Phares à gauche → aile à gauche
+            aile_x2    = int(crop_w * 0.38)
+            capot_x1   = int(crop_w * 0.30)
+            capot_x2   = crop_w
+            pc_x1      = int(crop_w * 0.20)
+            return [
+                {"name": "Capot avant",    "xA": capot_x1, "xB": capot_x2,
+                 "yA": capot_y1, "yB": capot_y2},
+                {"name": "Aile avant",     "xA": 0,        "xB": aile_x2,
+                 "yA": capot_y1, "yB": parechoc_y2},
+                {"name": "Pare-chocs av.", "xA": pc_x1,    "xB": crop_w,
+                 "yA": parechoc_y1, "yB": parechoc_y2},
+            ]
+        else:
+            # Phares à droite → aile à droite
+            aile_x1    = int(crop_w * 0.62)
+            capot_x1   = 0
+            capot_x2   = int(crop_w * 0.70)
+            pc_x2      = int(crop_w * 0.80)
+            return [
+                {"name": "Capot avant",    "xA": capot_x1, "xB": capot_x2,
+                 "yA": capot_y1, "yB": capot_y2},
+                {"name": "Aile avant",     "xA": aile_x1,  "xB": crop_w,
+                 "yA": capot_y1, "yB": parechoc_y2},
+                {"name": "Pare-chocs av.", "xA": 0,        "xB": pc_x2,
+                 "yA": parechoc_y1, "yB": parechoc_y2},
+            ]
 
-    # -----------------------------------------------
-    # VUE DE DERRIÈRE : Aile arr. gauche / Coffre /
-    # Aile arr. droite + Pare-chocs arrière
-    # -----------------------------------------------
-    elif view_type == "rear":
-        cut1    = int(crop_w * 0.22)
-        cut2    = int(crop_w * 0.78)
-        co_y2   = int(crop_h * 0.52)
-        pc_y1   = int(crop_h * 0.60)
-
-        return [
-            {"name": "Aile arr. gauche", "xA": 0,    "xB": cut1,   "yA": band_y1, "yB": band_y2},
-            {"name": "Coffre",           "xA": cut1, "xB": cut2,   "yA": band_y1, "yB": co_y2},
-            {"name": "Pare-chocs arr.",  "xA": cut1, "xB": cut2,   "yA": pc_y1,   "yB": band_y2},
-            {"name": "Aile arr. droite", "xA": cut2, "xB": crop_w, "yA": band_y1, "yB": band_y2},
-        ]
-
-    # -----------------------------------------------
-    # 3/4 AVANT : Capot / Aile avant / Pare-chocs av.
-    # Zones positionnées là où les pièces sont réellement
-    # -----------------------------------------------
-    elif view_type == "front_3q":
-        # Le capot est en haut, l'aile en bas-côté,
-        # le pare-chocs en bas-centre
-        capot_y2 = int(crop_h * 0.48)
-        pc_y1    = int(crop_h * 0.62)
+    # --------------------------------------------------
+    # CAS 3 : VUE ARRIÈRE SEULEMENT
+    # Coffre/hayon = partie haute centrale
+    # Aile arrière = côté latéral avec feux rouges
+    # Pare-chocs arrière = partie basse
+    # --------------------------------------------------
+    elif view_type == "rear_only":
+        coffre_y1   = int(crop_h * 0.08)
+        coffre_y2   = int(crop_h * 0.52)
+        parechoc_y1 = int(crop_h * 0.62)
+        parechoc_y2 = int(crop_h * 0.92)
 
         if orientation == "left":
-            # Avant à gauche
-            cut_capot = int(crop_w * 0.55)
-            cut_aile  = int(crop_w * 0.30)
+            # Feux à gauche → aile arrière à gauche
+            aile_x2  = int(crop_w * 0.40)
+            co_x1    = int(crop_w * 0.25)
+            pc_x1    = int(crop_w * 0.15)
             return [
-                {"name": "Capot avant",    "xA": cut_aile, "xB": crop_w, "yA": band_y1, "yB": capot_y2},
-                {"name": "Aile avant",     "xA": 0,        "xB": cut_aile,"yA": band_y1, "yB": band_y2},
-                {"name": "Pare-chocs av.", "xA": cut_aile, "xB": crop_w, "yA": pc_y1,   "yB": band_y2},
+                {"name": "Coffre / hayon",  "xA": co_x1,  "xB": crop_w,
+                 "yA": coffre_y1, "yB": coffre_y2},
+                {"name": "Aile arriere",    "xA": 0,       "xB": aile_x2,
+                 "yA": coffre_y1, "yB": parechoc_y2},
+                {"name": "Pare-chocs arr.", "xA": pc_x1,   "xB": crop_w,
+                 "yA": parechoc_y1, "yB": parechoc_y2},
             ]
         else:
-            # Avant à droite
-            cut_capot = int(crop_w * 0.45)
-            cut_aile  = int(crop_w * 0.70)
+            # Feux à droite → aile arrière à droite
+            aile_x1  = int(crop_w * 0.60)
+            co_x2    = int(crop_w * 0.75)
+            pc_x2    = int(crop_w * 0.85)
             return [
-                {"name": "Capot avant",    "xA": 0,        "xB": cut_aile, "yA": band_y1, "yB": capot_y2},
-                {"name": "Aile avant",     "xA": cut_aile, "xB": crop_w,   "yA": band_y1, "yB": band_y2},
-                {"name": "Pare-chocs av.", "xA": 0,        "xB": cut_aile, "yA": pc_y1,   "yB": band_y2},
+                {"name": "Coffre / hayon",  "xA": 0,       "xB": co_x2,
+                 "yA": coffre_y1, "yB": coffre_y2},
+                {"name": "Aile arriere",    "xA": aile_x1, "xB": crop_w,
+                 "yA": coffre_y1, "yB": parechoc_y2},
+                {"name": "Pare-chocs arr.", "xA": 0,       "xB": pc_x2,
+                 "yA": parechoc_y1, "yB": parechoc_y2},
             ]
 
-    # -----------------------------------------------
-    # 3/4 ARRIÈRE : Coffre / Aile arrière / Pare-chocs
-    # -----------------------------------------------
+    # --------------------------------------------------
+    # CAS 4 : 3/4 ARRIÈRE
+    # --------------------------------------------------
     elif view_type == "rear_3q":
-        coffre_y2 = int(crop_h * 0.48)
-        pc_y1     = int(crop_h * 0.62)
+        coffre_y2   = int(crop_h * 0.50)
+        parechoc_y1 = int(crop_h * 0.60)
 
         if orientation == "left":
-            cut_aile = int(crop_w * 0.30)
+            cut = int(crop_w * 0.42)
             return [
-                {"name": "Coffre",          "xA": cut_aile, "xB": crop_w, "yA": band_y1, "yB": coffre_y2},
-                {"name": "Aile arriere",    "xA": 0,        "xB": cut_aile,"yA": band_y1, "yB": band_y2},
-                {"name": "Pare-chocs arr.", "xA": cut_aile, "xB": crop_w, "yA": pc_y1,   "yB": band_y2},
+                {"name": "Coffre / hayon",  "xA": cut, "xB": crop_w,
+                 "yA": band_y1, "yB": coffre_y2},
+                {"name": "Aile arriere",    "xA": 0,   "xB": cut,
+                 "yA": band_y1, "yB": band_y2},
+                {"name": "Pare-chocs arr.", "xA": cut, "xB": crop_w,
+                 "yA": parechoc_y1, "yB": band_y2},
             ]
         else:
-            cut_aile = int(crop_w * 0.70)
+            cut = int(crop_w * 0.58)
             return [
-                {"name": "Coffre",          "xA": 0,        "xB": cut_aile, "yA": band_y1, "yB": coffre_y2},
-                {"name": "Aile arriere",    "xA": cut_aile, "xB": crop_w,   "yA": band_y1, "yB": band_y2},
-                {"name": "Pare-chocs arr.", "xA": 0,        "xB": cut_aile, "yA": pc_y1,   "yB": band_y2},
+                {"name": "Coffre / hayon",  "xA": 0,   "xB": cut,
+                 "yA": band_y1, "yB": coffre_y2},
+                {"name": "Aile arriere",    "xA": cut, "xB": crop_w,
+                 "yA": band_y1, "yB": band_y2},
+                {"name": "Pare-chocs arr.", "xA": 0,   "xB": cut,
+                 "yA": parechoc_y1, "yB": band_y2},
             ]
 
     # Fallback
     cut1 = int(crop_w * 0.33)
     cut2 = int(crop_w * 0.67)
     return [
-        {"name": "Zone gauche",  "xA": 0,    "xB": cut1,   "yA": band_y1, "yB": band_y2},
-        {"name": "Zone centre",  "xA": cut1, "xB": cut2,   "yA": band_y1, "yB": band_y2},
-        {"name": "Zone droite",  "xA": cut2, "xB": crop_w, "yA": band_y1, "yB": band_y2},
+        {"name": "Zone gauche",  "xA": 0,    "xB": cut1,
+         "yA": band_y1, "yB": band_y2},
+        {"name": "Zone centre",  "xA": cut1, "xB": cut2,
+         "yA": band_y1, "yB": band_y2},
+        {"name": "Zone droite",  "xA": cut2, "xB": crop_w,
+         "yA": band_y1, "yB": band_y2},
     ]
 
 
@@ -464,18 +496,14 @@ def analyse():
         crop_h, crop_w = car_crop.shape[:2]
 
         # ===============================================
-        # DÉTECTER VUE + ÉLÉMENTS VISIBLES
+        # DÉTECTER LA VUE
         # ===============================================
-        view_type, orientation, elements, view_log = detect_view(
-            car_crop, detections
-        )
+        view_type, orientation, view_info, view_log = detect_view(car_crop)
 
         # ===============================================
-        # ZONES ADAPTÉES
+        # ZONES ADAPTÉES À LA VUE
         # ===============================================
-        zones = define_zones(
-            view_type, orientation, crop_h, crop_w, elements
-        )
+        zones = define_zones(view_type, orientation, crop_h, crop_w)
 
         # ===============================================
         # MASQUE + ESPACES COLORIMÉTRIQUES
@@ -485,8 +513,7 @@ def analyse():
         mask_body = build_body_mask(car_crop, hsv_full)
 
         # ===============================================
-        # RÉFÉRENCE GLOBALE EN LAB
-        # (anti-reflets : percentiles 10-90)
+        # RÉFÉRENCE GLOBALE LAB (percentiles 10-90)
         # ===============================================
         vl_all = lab_full[mask_body > 0]
         if len(vl_all) < 100:
@@ -504,7 +531,7 @@ def analyse():
             float(np.median(vl_ref[:, 2]))
         ])
 
-        # Variabilité naturelle normalisée
+        # Variabilité naturelle pour normalisation
         nat_std_a = max(float(np.std(vl_ref[:, 1])), 1.0)
         nat_std_b = max(float(np.std(vl_ref[:, 2])), 1.0)
 
@@ -521,7 +548,7 @@ def analyse():
 
         cv2.rectangle(final_img, (x1, y1), (x2, y2), (220, 220, 220), thick_line)
 
-        # Séparateurs entre zones
+        # Séparateurs entre zones (évite les doublons)
         drawn_x = set()
         step = max(10, int(12 * scale_y))
         dash = max(4,  int(6  * scale_y))
@@ -530,12 +557,13 @@ def analyse():
                 if cx in drawn_x or cx == 0 or cx == crop_w:
                     continue
                 drawn_x.add(cx)
-                yA_d = y1 + zone["yA"]
-                yB_d = y1 + zone["yB"]
+                abs_cy = x1 + cx
+                yA_d   = y1 + zone["yA"]
+                yB_d   = y1 + zone["yB"]
                 for dy in range(yA_d, yB_d, step):
                     cv2.line(final_img,
-                             (x1 + cx, dy),
-                             (x1 + cx, dy + dash),
+                             (abs_cy, dy),
+                             (abs_cy, dy + dash),
                              (255, 255, 255), thick_line)
 
         results_zones = []
@@ -560,7 +588,7 @@ def analyse():
                 diff        = 0.0
                 verdict     = "Non analysable"
             else:
-                # Delta LAB normalisé par variabilité naturelle
+                # Score normalisé LAB (a,b) sans luminosité L
                 da   = abs(zone_color[1] - ref_color[1]) / nat_std_a
                 db   = abs(zone_color[2] - ref_color[2]) / nat_std_b
                 diff = float(np.sqrt(da**2 + db**2))
@@ -612,13 +640,13 @@ def analyse():
         # ===============================================
         # SCORE GLOBAL
         # ===============================================
-        scores = [z["score"] for z in results_zones if z["score"] > 0]
-        final_score_raw = float(np.mean(scores)) if scores else 0.0
-        final_score_100 = min(int(final_score_raw * 40), 100)
+        scores      = [z["score"] for z in results_zones if z["score"] > 0]
+        score_raw   = float(np.mean(scores)) if scores else 0.0
+        score_100   = min(int(score_raw * 40), 100)
 
-        if final_score_raw > 1.8:
+        if score_raw > 1.8:
             result = "Difference importante — repeinture probable"
-        elif final_score_raw > 0.9:
+        elif score_raw > 0.9:
             result = "Legeres variations detectees"
         else:
             result = "Peinture homogene (OK)"
@@ -631,17 +659,16 @@ def analyse():
             os.remove(resized_path)
 
         return jsonify({
-            "yolo":           yolo_result,
-            "score":          final_score_100,
-            "score_raw":      round(final_score_raw, 2),
-            "result":         result,
-            "zones":          results_zones,
-            "zones_detected": detected,
-            "view_type":      view_type,
-            "orientation":    orientation,
-            "elements":       list(elements),
-            "view_log":       view_log,
-            "image_size":     {"width": orig_w, "height": orig_h},
+            "yolo":          yolo_result,
+            "score":         score_100,
+            "score_raw":     round(score_raw, 2),
+            "result":        result,
+            "zones":         results_zones,
+            "zones_detected":detected,
+            "view_type":     view_type,
+            "orientation":   orientation,
+            "view_log":      view_log,
+            "image_size":    {"width": orig_w, "height": orig_h},
             "calibration": {
                 "nat_std_a": round(nat_std_a, 1),
                 "nat_std_b": round(nat_std_b, 1),
@@ -649,8 +676,8 @@ def analyse():
                 "ref_a":     round(ref_color[1], 1),
                 "ref_b":     round(ref_color[2], 1)
             },
-            "image_result":   analysed_name,
-            "image_url":      request.host_url + "uploads/" + analysed_name
+            "image_result":  analysed_name,
+            "image_url":     request.host_url + "uploads/" + analysed_name
         })
 
     except Exception as e:
