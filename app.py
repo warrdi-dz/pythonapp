@@ -165,7 +165,7 @@ def detect_view(car_crop):
         log.append("→ VUE COTE COMPLETE (portes visibles)")
 
         # Orientation via feux rouges
-        if red_tot > 200:
+        if red_tot > 300:
             if red_L > red_R * 1.4:
                 log.append("feux gauche → avant DROITE")
                 return "side_full", "right", info, log
@@ -183,7 +183,7 @@ def detect_view(car_crop):
                 return "side_full", "right", info, log
 
         # Orientation via pare-brise
-        if glass_L > glass_R * 1.2:
+        if glass_L > glass_R * 1.3:
             return "side_full", "left", info, log
         return "side_full", "right", info, log
 
@@ -192,7 +192,7 @@ def detect_view(car_crop):
     # Phares visibles + pas de feux rouges significatifs
     # + pas de portes (ratio < 1.5 ou vitres courtes)
     # =============================================
-    if white_tot > 120 and red_tot < 150 and not has_doors:
+    if white_tot > 100 and red_tot < 150 and not has_doors:
         log.append("→ VUE AVANT SEULMENT (capot + phares + aile)")
         if white_L > white_R:
             return "front_only", "left", info, log
@@ -595,11 +595,11 @@ def analyse():
 
                 label_score = f"{diff:.1f}"
 
-                if diff > 1.8:
+                if diff < 1:
                     color_rect = (0, 0, 255)
                     verdict    = "Peinture refaite!"
                     detected  += 1
-                elif diff > 0.9:
+                elif diff > 1 and diff< 1.8:
                     color_rect = (0, 165, 255)
                     verdict    = "Variation suspecte"
                     detected  += 1
