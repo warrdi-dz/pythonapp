@@ -595,7 +595,7 @@ def analyse():
 
                 label_score = f"{diff:.1f}"
 
-                if diff => 1 and diff<1.8:
+                if diff > 1 and diff < 1.8:
                     color_rect = (0, 0, 255)
                     verdict    = "Peinture refaite!"
                     detected  += 1
