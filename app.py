@@ -1,397 +1,472 @@
-import os
+from flask import Flask, request, jsonify, send_from_directory
 import cv2
 import numpy as np
+import os
+import time
+import traceback
 import requests
-from flask import Flask, request, jsonify, send_from_directory
 from werkzeug.utils import secure_filename
-import logging
-import uuid
-from datetime import datetime
 
-# Configuration
 app = Flask(__name__)
+
 UPLOAD_FOLDER = "uploads"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER
-app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024  # 16 MB max
 
-# Logging
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-logger = logging.getLogger(__name__)
+# Taille envoyée à YOLO uniquement
+YOLO_W = 900
+YOLO_H = 500
 
-# ============================================================
-# FONCTIONS DE TRAITEMENT D'IMAGE
-# ============================================================
+# =========================
+# YOLO API CALL
+# =========================
+def call_yolo(image_path):
+    url = "https://warrdi.com/pytho/detect"
+    try:
+        with open(image_path, "rb") as f:
+            files = {"image": f}
+            r = requests.post(url, files=files, timeout=20)
+        if r.status_code == 200:
+            return r.json()
+        return {"error": "YOLO failed", "status": r.status_code}
+    except Exception as e:
+        return {"error": "YOLO exception", "details": str(e)}
 
-def get_car_mask_excluding_white_ground(hsv_img):
-    """
-    Crée un masque qui isole la carrosserie en ignorant :
-    - Le ciel (bleu clair)
-    - Le sol blanc/clair
-    - Les ombres très sombres
-    """
-    # Plage HSV pour la carrosserie (couleurs de voiture courantes)
-    # On exclut le blanc pur (sol) et le bleu clair (ciel)
-    
-    lower_car = np.array([0, 30, 30])      # Teinte min, Saturation min, Value min
-    upper_car = np.array([180, 255, 230])   # Teinte max, Saturation max, Value max (exclut blanc)
-    
-    # Masque principal : tout ce qui ressemble à une carrosserie
-    car_mask = cv2.inRange(hsv_img, lower_car, upper_car)
-    
-    # Exclure les zones trop claires (sol blanc)
-    white_threshold = 240
-    not_white = cv2.inRange(hsv_img, (0, 0, 0), (180, 60, white_threshold))
-    
-    # Exclure les zones trop sombres (ombres)
-    dark_threshold = 40
-    not_dark = cv2.inRange(hsv_img, (0, 0, dark_threshold), (180, 255, 255))
-    
-    # Combiner les masques
-    final_mask = cv2.bitwise_and(car_mask, not_white)
-    final_mask = cv2.bitwise_and(final_mask, not_dark)
-    
-    # Nettoyage morphologique
-    kernel = np.ones((5,5), np.uint8)
-    final_mask = cv2.morphologyEx(final_mask, cv2.MORPH_CLOSE, kernel)
-    final_mask = cv2.morphologyEx(final_mask, cv2.MORPH_OPEN, kernel)
-    
-    return final_mask
-
-
-def get_dominant_color(hsv_img, mask):
-    """
-    Trouve la couleur la plus fréquente (mode) dans les pixels valides
-    au lieu de la moyenne qui est faussée par les valeurs aberrantes
-    """
-    # Extraire les pixels valides
-    valid_pixels = hsv_img[mask > 0]
-    
-    if len(valid_pixels) == 0:
-        return np.array([0, 0, 0])
-    
-    # Trouver la teinte dominante (H)
-    h_values = valid_pixels[:, 0]
-    h_hist = np.bincount(h_values.astype(int), minlength=180)
-    dominant_h = np.argmax(h_hist)
-    
-    # Trouver la saturation dominante (S) pour cette teinte
-    s_values = valid_pixels[(valid_pixels[:, 0] >= dominant_h - 5) & 
-                            (valid_pixels[:, 0] <= dominant_h + 5)][:, 1]
-    if len(s_values) > 0:
-        s_hist = np.bincount(s_values.astype(int), minlength=256)
-        dominant_s = np.argmax(s_hist)
-    else:
-        dominant_s = 0
-    
-    # Trouver la valeur dominante (V) pour cette teinte ET cette saturation
-    v_values = valid_pixels[(valid_pixels[:, 0] >= dominant_h - 5) & 
-                            (valid_pixels[:, 0] <= dominant_h + 5) &
-                            (valid_p
-
-                            (valid_pixels[:, 1] >= dominant_s - 8) & 
-                            (valid_pixels[:, 1] <= dominant_s + 8)
-                           ][:, 2]
-    
-    if len(v_values) > 0:
-        v_hist = np.bincount(v_values.astype(int), minlength=256)
-        dominant_v = np.argmax(v_hist)
-    else:
-        dominant_v = 0
-    
-    return np.array([dominant_h, dominant_s, dominant_v])
-
-
-def analyze_texture(gray_img, mask):
-    """
-    Analyse la texture de la carrosserie en utilisant :
-    - Variance locale (Laplacian)
-    - Gradient moyen
-    - Homogénéité
-    """
-    # Appliquer le masque
-    masked_gray = cv2.bitwise_and(gray_img, gray_img, mask=mask)
-    
-    # 1. Variance locale (Laplacian) - détecte les détails fins
-    laplacian = cv2.Laplacian(masked_gray, cv2.CV_64F)
-    laplacian_variance = np.var(laplacian[laplacian != 0]) if np.sum(laplacian != 0) > 0 else 0
-    
-    # 2. Gradient moyen (Sobel) - détecte les transitions
-    sobel_x = cv2.Sobel(masked_gray, cv2.CV_64F, 1, 0, ksize=3)
-    sobel_y = cv2.Sobel(masked_gray, cv2.CV_64F, 0, 1, ksize=3)
-    gradient_magnitude = np.sqrt(sobel_x**2 + sobel_y**2)
-    mean_gradient = np.mean(gradient_magnitude[gradient_magnitude != 0]) if np.sum(gradient_magnitude != 0) > 0 else 0
-    
-    # 3. Homogénéité (GLCM simplifié)
-    # On divise l'image en blocs et on calcule la variance intra-bloc
-    h, w = gray_img.shape
-    block_size = 20
-    block_variances = []
-    
-    for y in range(0, h, block_size):
-        for x in range(0, w, block_size):
-            block_mask = mask[y:y+block_size, x:x+block_size]
-            if np.sum(block_mask) > (block_size * block_size * 0.3):  # Au moins 30% du bloc est valide
-                block = gray_img[y:y+block_size, x:x+block_size]
-                block_var = np.var(block[block_mask > 0]) if np.sum(block_mask > 0) > 0 else 0
-                block_variances.append(block_var)
-    
-    homogeneity = np.mean(block_variances) if block_variances else 0
-    
-    # Score de texture normalisé (0 = très lisse, 1 = très texturé)
-    texture_score = min(1.0, (laplacian_variance / 1000 + mean_gradient / 50 + homogeneity / 500) / 3)
-    
-    return {
-        "laplacian_variance": float(laplacian_variance),
-        "mean_gradient": float(mean_gradient),
-        "homogeneity": float(homogeneity),
-        "texture_score": float(texture_score)
-    }
-
-
-def analyze_paint_quality(hsv_img, gray_img, mask):
-    """
-    Analyse complète de la qualité de la peinture
-    """
-    # 1. Couleur dominante
-    dominant_color = get_dominant_color(hsv_img, mask)
-    
-    # 2. Analyse de texture
-    texture_data = analyze_texture(gray_img, mask)
-    
-    # 3. Évaluation de la qualité basée sur la texture
-    # Une bonne peinture = texture lisse et homogène
-    if texture_data["texture_score"] < 0.3:
-        quality = "excellente"
-        quality_score = 5
-    elif texture_data["texture_score"] < 0.5:
-        quality = "bonne"
-        quality_score = 4
-    elif texture_data["texture_score"] < 0.7:
-        quality = "moyenne"
-        quality_score = 3
-    elif texture_data["texture_score"] < 0.85:
-        quality = "passable"
-        quality_score = 2
-    else:
-        quality = "mauvaise
-
-        quality = "mauvaise"
-        quality_score = 1
-
-    # 4. Détection de défauts (rayures, bosses)
-    # Utilisation du gradient pour trouver des anomalies
-    sobel_x = cv2.Sobel(gray_img, cv2.CV_64F, 1, 0, ksize=3)
-    sobel_y = cv2.Sobel(gray_img, cv2.CV_64F, 0, 1, ksize=3)
-    gradient_magnitude = np.sqrt(sobel_x**2 + sobel_y**2)
-    
-    # Seuil adaptatif pour les défauts
-    defect_threshold = np.percentile(gradient_magnitude[mask > 0], 95) if np.sum(mask > 0) > 0 else 50
-    defects = (gradient_magnitude > defect_threshold) & (mask > 0)
-    defect_percentage = float(np.sum(defects) / np.sum(mask > 0) * 100) if np.sum(mask > 0) > 0 else 0
-
-    return {
-        "dominant_color_hsv": {
-            "hue": int(dominant_color[0]),
-            "saturation": int(dominant_color[1]),
-            "value": int(dominant_color[2])
-        },
-        "dominant_color_rgb": hsv_to_rgb(dominant_color),
-        "texture": texture_data,
-        "quality": quality,
-        "quality_score": quality_score,
-        "defect_percentage": defect_percentage
-    }
-
-
-def hsv_to_rgb(hsv_color):
-    """Convertit une couleur HSV en RGB"""
-    h, s, v = hsv_color
-    # OpenCV HSV : H=0-180, S=0-255, V=0-255
-    # Conversion vers HSV standard : H*2, S/255, V/255
-    h_std = h * 2
-    s_std = s / 255.0
-    v_std = v / 255.0
-    
-    # Conversion HSV standard vers RGB
-    c = v_std * s_std
-    x = c * (1 - abs((h_std / 60) % 2 - 1))
-    m = v_std - c
-    
-    if h_std < 60:
-        r, g, b = c, x, 0
-    elif h_std < 120:
-        r, g, b = x, c, 0
-    elif h_std < 180:
-        r, g, b = 0, c, x
-    elif h_std < 240:
-        r, g, b = 0, x, c
-    elif h_std < 300:
-        r, g, b = x, 0, c
-    else:
-        r, g, b = c, 0, x
-    
-    return {
-        "red": int((r + m) * 255),
-        "green": int((g + m) * 255),
-        "blue": int((b + m) * 255)
-    }
-
-
-def process_image(image_path):
-    """
-    Traite une image : charge, analyse peinture, retourne résultats
-    """
-    # Charger l'image
-    img = cv2.imread(image_path)
-    if img is None:
-        raise ValueError(f"Impossible de charger l'image : {image_path}")
-    
-    # Redimensionner si trop grande
-    h, w = img.shape[:2]
-    if max(h, w) > 1200:
-        scale = 1200 / max(h, w)
-        new_w, new_h = int(w * scale), int(h * scale)
-        img = cv2.resize(img, (new_w, new_h))
-    
-    # Convertir en HSV et gris
-    hsv_img = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-    gray_img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    
-    # Obtenir le masque de la carrosserie (sans le sol blanc)
-    mask = get_car_mask_excluding_white_ground(hsv_img)
-    
-    # Vérifier qu'on a assez de pixels valides
-    if np.sum(mask > 0) < 1000:
-        return {
-            "error": "Pas assez de carrosserie détectée. Vérifiez que la voiture est bien visible.",
-            "mask_coverage": float(np.sum(mask > 0) / (
-
-    if np.sum(mask > 0) < 500:  # Moins de 500 pixels valides
-        logger.warning(f"Pas assez de pixels de carrosserie détectés dans l'image")
-        return None, "Impossible de détecter la carrosserie. L'image doit contenir une voiture visible."
-    
-    # Analyser la peinture
-    result = analyze_paint_quality(hsv_img, gray_img, mask)
-    
-    # Sauvegarder l'image avec le masque (pour déboguer)
-    debug_img = img.copy()
-    debug_img[mask > 0] = [0, 255, 0]  # Marquer la zone analysée en vert
-    debug_path = os.path.join(app.config["UPLOAD_FOLDER"], f"debug_{filename}")
-    cv2.imwrite(debug_path, debug_img)
-    result["debug_image"] = debug_path
-    
-    return result, None
-
-
-# ============================================================
-# API ENDPOINTS
-# ============================================================
-
-@app.route("/analyze", methods=["POST"])
-def analyze_image():
-    """
-    Endpoint pour analyser une image de voiture
-    Accepte : fichier image ou URL
-    """
-    # Vérifier si fichier ou URL
-    if "file" in request.files:
-        file = request.files["file"]
-        if file.filename == "":
-            return jsonify({"error": "Aucun fichier sélectionné"}), 400
-        
-        # Sauvegarder le fichier
-        filename = secure_filename(file.filename)
-        # Ajouter un UUID pour éviter les collisions
-        unique_filename = f"{uuid.uuid4().hex}_{filename}"
-        filepath = os.path.join(app.config["UPLOAD_FOLDER"], unique_filename)
-        file.save(filepath)
-        
-    elif "url" in request.json:
-        url = request.json["url"]
-        try:
-            response = requests.get(url, timeout=10)
-            if response.status_code != 200:
-                return jsonify({"error": f"Impossible de télécharger l'image (HTTP {response.status_code})"}), 400
-            
-            # Sauvegarder l'image téléchargée
-            filename = f"url_{uuid.uuid4().hex}.jpg"
-            filepath = os.path.join(app.config["UPLOAD_FOLDER"], filename)
-            with open(filepath, "wb") as f:
-                f.write(response.content)
-        except Exception as e:
-            return jsonify({"error": f"Erreur lors du téléchargement : {str(e)}"}), 400
-    else:
-        return jsonify({"error": "Veuillez fournir un fichier (file) ou une URL (url)"}), 400
-    
-    # Analyser l'image
-    result, error = process_image(filepath, filename)
-    
-    if error:
-        return jsonify({"error": error}), 400
-    
-    # Ajouter des métadonnées
-    result["filename"] = filename
-    result["analyzed_at"] = datetime.now().isoformat()
-    
-    return jsonify(result), 200
-
-
+# =========================
+# UPLOADS
+# =========================
 @app.route("/uploads/<filename>")
-def uploaded_file(filename):
-    """Servir les fichiers uploadés (pour le débogage)"""
-    return send_from_directory(app.config["UPLOAD_FOLDER"], filename)
+def uploads(filename):
+    return send_from_directory(UPLOAD_FOLDER, filename)
+
+# =========================
+# HOME
+# =========================
+@app.route("/")
+def home():
+    return jsonify({"status": "OK", "message": "GARAGE PRO V4 API"})
+
+# =========================
+# COULEUR HSV MÉDIANE
+# =========================
+def get_zone_color(hsv_img, mask, xA, yA, xB, yB):
+    zone_mask = mask[yA:yB, xA:xB]
+    zone_hsv  = hsv_img[yA:yB, xA:xB]
+    valid     = zone_hsv[zone_mask > 0]
+    if len(valid) < 80:
+        return None, 0
+    return np.array([
+        float(np.median(valid[:, 0])),
+        float(np.median(valid[:, 1])),
+        float(np.median(valid[:, 2]))
+    ]), len(valid)
 
 
-@app.route("/health", methods=["GET"])
-def health_check():
-    """Endpoint de vérification de santé"""
-    return jsonify({
-        "status": "ok",
-        "timestamp": datetime.now().isoformat(),
-        "version": "1.0.0"
-    }), 200
+# =========================
+# AFFINER LE CROP
+# =========================
+def refine_car_bbox(img, x1, y1, x2, y2):
+    crop = img[y1:y2, x1:x2]
+    if crop.size == 0:
+        return x1, y1, x2, y2
+
+    hsv        = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+    mask_dark  = cv2.inRange(hsv, (0, 0, 0),   (180, 255, 40))
+    mask_sky   = cv2.inRange(hsv, (0, 0, 215), (180, 15, 255))
+    mask_valid = cv2.bitwise_not(cv2.bitwise_or(mask_dark, mask_sky))
+    k          = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+    mask_valid = cv2.morphologyEx(mask_valid, cv2.MORPH_CLOSE, k, iterations=2)
+
+    col_sum = mask_valid.sum(axis=0).astype(float)
+    row_sum = mask_valid.sum(axis=1).astype(float)
+    col_sum = np.convolve(col_sum, np.ones(15) / 15, mode='same')
+    row_sum = np.convolve(row_sum, np.ones(15) / 15, mode='same')
+
+    col_thresh = col_sum.max() * 0.08
+    row_thresh = row_sum.max() * 0.08
+    valid_cols = np.where(col_sum > col_thresh)[0]
+    valid_rows = np.where(row_sum > row_thresh)[0]
+
+    if len(valid_cols) < 20 or len(valid_rows) < 20:
+        return x1, y1, x2, y2
+
+    PAD    = 8
+    new_x1 = max(0,            x1 + int(valid_cols[0])  - PAD)
+    new_x2 = min(img.shape[1], x1 + int(valid_cols[-1]) + PAD)
+    new_y1 = max(0,            y1 + int(valid_rows[0])  - PAD)
+    new_y2 = min(img.shape[0], y1 + int(valid_rows[-1]) + PAD)
+
+    if (new_x2 - new_x1) < 100 or (new_y2 - new_y1) < 80:
+        return x1, y1, x2, y2
+
+    return new_x1, new_y1, new_x2, new_y2
 
 
-# ============================================================
-# POINT D'ENTRÉE PRINCIPAL
-# ============================================================
+# =========================
+# DÉTECTER ORIENTATION
+# =========================
+def detect_car_orientation(car_crop):
+    crop_h, crop_w = car_crop.shape[:2]
+    log = []
 
+    band_w  = int(crop_w * 0.22)
+    feux_y1 = int(crop_h * 0.38)
+    feux_y2 = int(crop_h * 0.88)
+
+    left_feux  = car_crop[feux_y1:feux_y2, 0:band_w]
+    right_feux = car_crop[feux_y1:feux_y2, crop_w - band_w:crop_w]
+
+    left_hsv  = cv2.cvtColor(left_feux,  cv2.COLOR_BGR2HSV)
+    right_hsv = cv2.cvtColor(right_feux, cv2.COLOR_BGR2HSV)
+
+    # Priorité 1 : feux rouges
+    def count_red(hsv):
+        m1 = cv2.inRange(hsv, (0,   60, 60), (12,  255, 255))
+        m2 = cv2.inRange(hsv, (168, 60, 60), (180, 255, 255))
+        return cv2.countNonZero(cv2.bitwise_or(m1, m2))
+
+    red_left  = count_red(left_hsv)
+    red_right = count_red(right_hsv)
+    total_red = red_left + red_right
+
+    if total_red > 150:
+        if red_left > red_right * 1.35:
+            log.append(f"P1 ROUGE: gauche={red_left} droite={red_right} → avant DROITE")
+            return "right", log
+        elif red_right > red_left * 1.35:
+            log.append(f"P1 ROUGE: gauche={red_left} droite={red_right} → avant GAUCHE")
+            return "left", log
+        else:
+            log.append(f"P1 ROUGE: equilibre ({red_left}/{red_right}), passe P2")
+    else:
+        log.append(f"P1 ROUGE: insuffisant ({total_red}px), passe P2")
+
+    # Priorité 2 : phares blancs/jaunes
+    def count_headlight(hsv):
+        white  = cv2.inRange(hsv, (0,  0,  170), (180, 90,  255))
+        yellow = cv2.inRange(hsv, (15, 40, 170), (40,  220, 255))
+        return cv2.countNonZero(cv2.bitwise_or(white, yellow))
+
+    light_left  = count_headlight(left_hsv)
+    light_right = count_headlight(right_hsv)
+    total_light = light_left + light_right
+
+    if total_light > 100:
+        if light_left > light_right * 1.35:
+            log.append(f"P2 PHARE: gauche={light_left} droite={light_right} → avant GAUCHE")
+            return "left", log
+        elif light_right > light_left * 1.35:
+            log.append(f"P2 PHARE: gauche={light_left} droite={light_right} → avant DROITE")
+            return "right", log
+        else:
+            log.append(f"P2 PHARE: equilibre ({light_left}/{light_right}), passe P3")
+    else:
+        log.append(f"P2 PHARE: insuffisant ({total_light}px), passe P3")
+
+    # Priorité 3 : taille pare-brise
+    gray       = cv2.cvtColor(car_crop, cv2.COLOR_BGR2GRAY)
+    vit_y1     = int(crop_h * 0.08)
+    vit_y2     = int(crop_h * 0.58)
+    vitre      = gray[vit_y1:vit_y2, :]
+    dark       = (vitre < 90).astype(np.uint8)
+    dark_f     = cv2.GaussianBlur(dark.astype(np.float32), (15, 15), 0)
+    mid        = crop_w // 2
+    left_glass  = float(dark_f[:, :mid].sum())
+    right_glass = float(dark_f[:, mid:].sum())
+
+    log.append(f"P3 VITRE: gauche={int(left_glass)} droite={int(right_glass)}")
+
+    if left_glass > right_glass * 1.15:
+        log.append("P3 VITRE: plus grand gauche → avant GAUCHE")
+        return "left", log
+    elif right_glass > left_glass * 1.15:
+        log.append("P3 VITRE: plus grand droite → avant DROITE")
+        return "right", log
+
+    # Fallback Sobel
+    left_band  = car_crop[feux_y1:feux_y2, 0:band_w]
+    right_band = car_crop[feux_y1:feux_y2, crop_w - band_w:crop_w]
+    lg = cv2.cvtColor(left_band,  cv2.COLOR_BGR2GRAY)
+    rg = cv2.cvtColor(right_band, cv2.COLOR_BGR2GRAY)
+    ls = float(np.mean(np.abs(cv2.Sobel(lg, cv2.CV_64F, 1, 1, ksize=3))))
+    rs = float(np.mean(np.abs(cv2.Sobel(rg, cv2.CV_64F, 1, 1, ksize=3))))
+
+    if rs > ls * 1.2:
+        log.append(f"FALLBACK Sobel: droite>{ls:.1f} → avant GAUCHE")
+        return "left", log
+    else:
+        log.append(f"FALLBACK Sobel: gauche>={rs:.1f} → avant DROITE")
+        return "right", log
+
+
+# =========================
+# ANALYSE
+# =========================
+@app.route("/analyse", methods=["POST"])
+def analyse():
+    try:
+        if "image" not in request.files:
+            return jsonify({"error": "no image"}), 400
+
+        file     = request.files["image"]
+        filename = str(int(time.time())) + "_" + secure_filename(file.filename)
+        path     = os.path.join(UPLOAD_FOLDER, filename)
+        file.save(path)
+
+        # ===============================================
+        # LIRE IMAGE ORIGINALE — on garde sa résolution
+        # ===============================================
+        img_orig = cv2.imread(path)
+        if img_orig is None:
+            return jsonify({"error": "image unreadable"}), 400
+
+        orig_h, orig_w = img_orig.shape[:2]
+
+        # ===============================================
+        # YOLO reçoit une version réduite 900x500
+        # pour que les coords matchent facilement
+        # ===============================================
+        img_yolo     = cv2.resize(img_orig, (YOLO_W, YOLO_H))
+        resized_path = os.path.join(UPLOAD_FOLDER, "resized_" + filename)
+        cv2.imwrite(resized_path, img_yolo)
+
+        yolo_result = call_yolo(resized_path)
+
+        detections = yolo_result.get("detections", [])
+        cars = [d for d in detections if d.get("class") == 2]
+        if not cars:
+            return jsonify({"error": "Car not detected"}), 400
+
+        # ===============================================
+        # COORDONNÉES YOLO sur 900x500
+        # → on les rescale sur la résolution originale
+        # ===============================================
+        scale_x = orig_w / YOLO_W
+        scale_y = orig_h / YOLO_H
+
+        raw_x1 = int(min(d["box"][0] for d in cars) * scale_x)
+        raw_y1 = int(min(d["box"][1] for d in cars) * scale_y)
+        raw_x2 = int(max(d["box"][2] for d in cars) * scale_x)
+        raw_y2 = int(max(d["box"][3] for d in cars) * scale_y)
+
+        # Padding proportionnel à la résolution originale
+        pad_x = int(15 * scale_x)
+        pad_y = int(10 * scale_y)
+        thr_x = int(150 * scale_x)
+        thr_y = int(80  * scale_y)
+
+        x1 = 0       if raw_x1 < thr_x             else max(0,      raw_x1 - pad_x)
+        x2 = orig_w  if (orig_w - raw_x2) < thr_x  else min(orig_w, raw_x2 + pad_x)
+        y1 = 0       if raw_y1 < thr_y             else max(0,      raw_y1 - pad_y)
+        y2 = orig_h  if (orig_h - raw_y2) < thr_y  else min(orig_h, raw_y2 + pad_y)
+
+        # ===============================================
+        # AFFINER LE CROP sur l'image originale
+        # ===============================================
+        x1, y1, x2, y2 = refine_car_bbox(img_orig, x1, y1, x2, y2)
+
+        car_crop = img_orig[y1:y2, x1:x2]
+        if car_crop.size == 0:
+            return jsonify({"error": "invalid crop"}), 400
+
+        crop_h, crop_w = car_crop.shape[:2]
+
+        # ===============================================
+        # ORIENTATION
+        # ===============================================
+        orientation, orient_log = detect_car_orientation(car_crop)
+
+        if orientation == "left":
+            zone_names = ["Avant", "Portes", "Arriere"]
+        else:
+            zone_names = ["Arriere", "Portes", "Avant"]
+
+        # ===============================================
+        # MASQUE CARROSSERIE
+        # ===============================================
+        hsv_full  = cv2.cvtColor(car_crop, cv2.COLOR_BGR2HSV)
+        mask_dark = cv2.inRange(hsv_full, (0, 0, 0),   (180, 255, 45))
+        mask_sky  = cv2.inRange(hsv_full, (0, 0, 210), (180, 18, 255))
+        mask_body = cv2.bitwise_not(cv2.bitwise_or(mask_dark, mask_sky))
+        kernel    = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        mask_body = cv2.morphologyEx(mask_body, cv2.MORPH_CLOSE, kernel)
+
+        # ===============================================
+        # MOYENNE GLOBALE
+        # ===============================================
+        all_valid = hsv_full[mask_body > 0]
+        if len(all_valid) < 100:
+            return jsonify({"error": "No body pixels found"}), 400
+
+        ref_color = np.array([
+            float(np.median(all_valid[:, 0])),
+            float(np.median(all_valid[:, 1])),
+            float(np.median(all_valid[:, 2]))
+        ])
+
+        # ===============================================
+        # 3 ZONES — proportionnelles au vrai crop
+        # ===============================================
+        band_y1 = int(crop_h * 0.15)
+        band_y2 = int(crop_h * 0.80)
+        cut1    = int(crop_w * 0.33)
+        cut2    = int(crop_w * 0.67)
+
+        zones = [
+            {"name": zone_names[0], "xA": 0,    "xB": cut1,   "yA": band_y1, "yB": band_y2},
+            {"name": zone_names[1], "xA": cut1, "xB": cut2,   "yA": band_y1, "yB": band_y2},
+            {"name": zone_names[2], "xA": cut2, "xB": crop_w, "yA": band_y1, "yB": band_y2},
+        ]
+
+        # ===============================================
+        # DESSIN sur l'image ORIGINALE haute résolution
+        # ===============================================
+        final_img = img_orig.copy()
+
+        # Épaisseur des traits proportionnelle à la résolution
+        thick_box  = max(3, int(5  * min(scale_x, scale_y)))
+        thick_line = max(1, int(1  * min(scale_x, scale_y)))
+        font_scale_big  = max(0.6, 0.6  * min(scale_x, scale_y))
+        font_scale_med  = max(0.5, 0.5  * min(scale_x, scale_y))
+        font_scale_ref  = max(0.4, 0.38 * min(scale_x, scale_y))
+        font_thick_big  = max(2, int(2  * min(scale_x, scale_y)))
+        font_thick_small= max(1, int(1  * min(scale_x, scale_y)))
+        overlay_h       = max(55, int(55 * scale_y))
+
+        # Contour total voiture
+        cv2.rectangle(final_img, (x1, y1), (x2, y2), (220, 220, 220), thick_line)
+
+        # Séparateurs pointillés
+        step  = max(10, int(12 * scale_y))
+        dash  = max(4,  int(6  * scale_y))
+        for cut in [cut1, cut2]:
+            for dy in range(band_y1, band_y2, step):
+                cv2.line(
+                    final_img,
+                    (x1 + cut, y1 + dy),
+                    (x1 + cut, y1 + dy + dash),
+                    (255, 255, 255), thick_line
+                )
+
+        results_zones = []
+        detected = 0
+
+        for zone in zones:
+            xA, xB = zone["xA"], zone["xB"]
+            yA, yB = zone["yA"], zone["yB"]
+
+            zone_color, px_count = get_zone_color(
+                hsv_full, mask_body, xA, yA, xB, yB
+            )
+
+            abs_x1 = x1 + xA
+            abs_y1 = y1 + yA
+            abs_x2 = x1 + xB
+            abs_y2 = y1 + yB
+
+            if zone_color is None:
+                color_rect  = (150, 150, 150)
+                label_score = "N/A"
+                diff        = 0.0
+                verdict     = "Non analysable"
+            else:
+                diff = float(np.linalg.norm(zone_color - ref_color))
+
+                if diff >= 14 and diff < 26:
+                    color_rect = (0, 0, 255)
+                    verdict    = "Attention peinture refaite!"
+                elif diff < 14:
+                    color_rect = (0, 165, 255)
+                    verdict    = "Legere variation suspecte!"
+                    detected  += 1
+                else:
+                    color_rect = (0, 210, 0)
+                    verdict    = "OK"
+                    detected  += 1
+
+                label_score = str(int(diff))
+
+            cv2.rectangle(final_img, (abs_x1, abs_y1),
+                          (abs_x2, abs_y2), color_rect, thick_box)
+
+            overlay = final_img.copy()
+            cv2.rectangle(overlay, (abs_x1, abs_y1),
+                          (abs_x2, abs_y1 + overlay_h), (0, 0, 0), -1)
+            cv2.addWeighted(overlay, 0.5, final_img, 0.5, 0, final_img)
+
+            cv2.putText(final_img, zone["name"],
+                        (abs_x1 + 8, abs_y1 + int(overlay_h * 0.40)),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        font_scale_big, (255, 255, 255), font_thick_big)
+
+            cv2.putText(final_img, f"Ecart: {label_score}",
+                        (abs_x1 + 8, abs_y1 + int(overlay_h * 0.80)),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        font_scale_med, color_rect, font_thick_big)
+
+            cv2.putText(final_img, verdict,
+                        (abs_x1 + 8, abs_y2 - int(10 * scale_y)),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        font_scale_med, color_rect, font_thick_big)
+
+            results_zones.append({
+                "zone":    zone["name"],
+                "diff":    round(diff, 1),
+                "pixels":  px_count,
+                "verdict": verdict
+            })
+
+        # ===============================================
+        # SCORE GLOBAL
+        # ===============================================
+        diffs = [z["diff"] for z in results_zones if z["diff"] > 0]
+        final_score = int(np.mean(diffs)) if diffs else 0
+        final_score = min(final_score, 100)
+
+        if final_score < 10:
+            result = "Peinture homogene (OK)"
+        elif final_score < 28:
+            result = "Legeres variations detectees"
+        else:
+            result = "Difference importante — repeinture probable"
+
+        
+
+        analysed_name = "analysed_" + filename
+        analysed_path = os.path.join(UPLOAD_FOLDER, analysed_name)
+
+        # Sauvegarde en qualité originale
+        cv2.imwrite(analysed_path, final_img)
+
+        if os.path.exists(resized_path):
+            os.remove(resized_path)
+
+        return jsonify({
+            "yolo":            yolo_result,
+            "score":           final_score,
+            "result":          result,
+            "zones":           results_zones,
+            "zones_detected":  detected,
+            "orientation":     orientation,
+            "orientation_log": orient_log,
+            "image_size":      {"width": orig_w, "height": orig_h},
+            "reference_hsv": {
+                "H": round(ref_color[0], 1),
+                "S": round(ref_color[1], 1),
+                "V": round(ref_color[2], 1)
+            },
+            "image_result":    analysed_name,
+            "image_url":       request.host_url + "uploads/" + analysed_name
+        })
+
+    except Exception as e:
+        return jsonify({
+            "error": str(e),
+            "trace": traceback.format_exc()
+        }), 500
+
+
+# =========================
+# RUN SERVER
+# =========================
 if __name__ == "__main__":
-    logger.info("🚗 Démarrage du service d'analyse de peinture automobile...")
-    logger.info(f"📁 Dossier d'upload : {UPLOAD_FOLDER}")
-    logger.info("🌐 Serveur démarré sur http://0.0.0.0:5000")
-    app.run(host="0.0.0.0", port=5000, debug=True)
-Fichier requirements.txt
-Flask==3.0.0
-opencv-python==4.9.0.80
-numpy==1.26.2
-requests==2.31.0
-Werkzeug==3.0.1
-gunicorn==21.2.0
-Instructions d’installation
-# 1. Créer un environnement virt
-suite ne t aret pas
-
-# 1. Créer un environnement virtuel
-python -m venv venv
-
-# 2. Activer l'environnement virtuel
-# Sur Windows :
-venv\Scripts\activate
-# Sur MacOS/Linux :
-source venv/bin/activate
-
-# 3. Installer les dépendances
-pip install -r requirements.txt
-
-# 4. Lancer l'application
-python app.py
-
-# 5. Tester avec curl (exemple)
-curl -X POST -F "file=@test_car.jpg" http://localhost:5000/analyze
-
-# 6. Ou avec une URL
-curl -X POST -H "Content-Type: application/json" \
-     -d '{"url": "https://example.com/car.jpg"}' \
-     http://localhost:5000/analyze
+    app.run(host="0.0.0.0", port=5000)
