@@ -289,6 +289,8 @@ def analyse():
         mask_body = cv2.bitwise_not(cv2.bitwise_or(mask_dark, mask_sky))
         kernel    = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
         mask_body = cv2.morphologyEx(mask_body, cv2.MORPH_CLOSE, kernel)
+        mask_reflect = cv2.inRange(hsv_full,(0, 0, 220),(180, 80, 255))
+        mask_body = cv2.bitwise_and(mask_body,cv2.bitwise_not(mask_reflect))
 
         # ===============================================
         # MOYENNE GLOBALE
