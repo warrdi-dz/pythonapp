@@ -595,11 +595,11 @@ def analyse():
 
                 label_score = f"{diff:.1f}"
 
-                if diff < 1:
+                if diff => 1: and diff<1.8
                     color_rect = (0, 0, 255)
                     verdict    = "Peinture refaite!"
                     detected  += 1
-                elif diff > 1 and diff< 1.8:
+                elif diff > 0.8 and diff< 1:
                     color_rect = (0, 165, 255)
                     verdict    = "Variation suspecte"
                     detected  += 1
