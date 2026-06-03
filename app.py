@@ -30,46 +30,165 @@ def call_yolo(image_path):
     except Exception as e:
         return {"error": "YOLO exception", "details": str(e)}
 
-# =========================
-# UPLOADS
-# =========================
 @app.route("/uploads/<filename>")
 def uploads(filename):
     return send_from_directory(UPLOAD_FOLDER, filename)
 
-# =========================
-# HOME
-# =========================
 @app.route("/")
 def home():
     return jsonify({"status": "OK", "message": "GARAGE PRO V4 API"})
 
-# =========================
-# COULEUR HSV + LAB MÉDIANE
-# =========================
-def get_zone_color(hsv_img, lab_img, mask, xA, yA, xB, yB):
-    zone_mask  = mask[yA:yB, xA:xB]
-    hsv_zone   = hsv_img[yA:yB, xA:xB]
-    lab_zone   = lab_img[yA:yB, xA:xB]
-    valid_mask = zone_mask > 0
-    hsv_valid  = hsv_zone[valid_mask]
-    lab_valid  = lab_zone[valid_mask]
 
-    if len(hsv_valid) < 80:
-        return None, None, 0
+# =============================================
+# MASQUE CARROSSERIE
+# Retire vitres, pneus, plastique, reflets
+# =============================================
+def build_mask(car_crop):
+    hsv = cv2.cvtColor(car_crop, cv2.COLOR_BGR2HSV)
 
-    zone_hsv = np.array([
-        float(np.median(hsv_valid[:, 0])),
-        float(np.median(hsv_valid[:, 1])),
-        float(np.median(hsv_valid[:, 2]))
-    ])
-    zone_lab = np.array([
-        float(np.median(lab_valid[:, 0])),
-        float(np.median(lab_valid[:, 1])),
-        float(np.median(lab_valid[:, 2]))
-    ])
+    # Trop sombre = vitres, pneus
+    mask_dark = cv2.inRange(hsv, (0, 0, 0),   (180, 255, 45))
+    # Fond blanc / ciel
+    mask_sky  = cv2.inRange(hsv, (0, 0, 215), (180, 18, 255))
+    # Plastique, chrome, faible saturation
+    mask_chro = cv2.inRange(hsv, (0, 0, 0),   (180, 30, 255))
+    # Surexposé = reflets soleil
+    mask_over = cv2.inRange(hsv, (0, 0, 230), (180, 255, 255))
 
-    return zone_hsv, zone_lab, len(hsv_valid)
+    exclude   = cv2.bitwise_or(mask_dark, mask_sky)
+    exclude   = cv2.bitwise_or(exclude,   mask_chro)
+    exclude   = cv2.bitwise_or(exclude,   mask_over)
+    mask_body = cv2.bitwise_not(exclude)
+
+    k         = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    mask_body = cv2.morphologyEx(mask_body, cv2.MORPH_CLOSE, k, iterations=2)
+    mask_body = cv2.morphologyEx(mask_body, cv2.MORPH_OPEN,  k, iterations=1)
+
+    return mask_body
+
+
+# =============================================
+# FEATURES D'UNE ZONE
+# LAB (a,b) + teinte H + texture
+# On IGNORE L et V (luminosité) → anti-soleil
+# =============================================
+def get_zone_features(lab_img, hsv_img, gray_img, mask, xA, yA, xB, yB):
+    zm   = mask[yA:yB, xA:xB]
+    zl   = lab_img[yA:yB, xA:xB]
+    zh   = hsv_img[yA:yB, xA:xB]
+    zg   = gray_img[yA:yB, xA:xB]
+
+    vl   = zl[zm > 0]
+    vh   = zh[zm > 0]
+    vg   = zg[zm > 0]
+
+    if len(vl) < 80:
+        return None
+
+    return {
+        # Teinte pure LAB sans luminosité
+        "a":       float(np.median(vl[:, 1])),
+        "b":       float(np.median(vl[:, 2])),
+        "a_std":   float(np.std(vl[:, 1])),
+        "b_std":   float(np.std(vl[:, 2])),
+        # Teinte H et saturation S
+        "h":       float(np.median(vh[:, 0])),
+        "s":       float(np.median(vh[:, 1])),
+        # Texture grain peinture
+        "texture": float(np.std(vg)),
+        "count":   len(vl)
+    }
+
+
+# =============================================
+# SCORE ADAPTATIF
+# Compare zone à référence avec seuils
+# calibrés sur la variabilité naturelle
+# de CETTE voiture spécifique
+# =============================================
+def compute_adaptive_score(zone_f, ref_f, natural_std_a, natural_std_b):
+    """
+    natural_std_a / natural_std_b = écart-type naturel
+    des canaux a,b sur toute la carrosserie.
+    Ça représente la variabilité normale de la voiture
+    (ombres, courbures, reflets légers).
+
+    On normalise le delta par cet écart-type naturel :
+    - Si delta >> natural_std → vraiment différent
+    - Si delta ≈ natural_std  → variation normale
+
+    C'est ce qui rend le score universel pour toute
+    couleur de voiture.
+    """
+    # Delta teinte a,b LAB normalisé
+    raw_da = abs(zone_f["a"] - ref_f["a"])
+    raw_db = abs(zone_f["b"] - ref_f["b"])
+
+    # Normalisation : combien de "déviations naturelles"
+    norm_da = raw_da / max(natural_std_a, 1.0)
+    norm_db = raw_db / max(natural_std_b, 1.0)
+    delta_ab_norm = float(np.sqrt(norm_da**2 + norm_db**2))
+
+    # Delta teinte H circulaire normalisé
+    dh = abs(zone_f["h"] - ref_f["h"])
+    if dh > 90:
+        dh = 180 - dh
+    delta_h_norm = float(dh) / 10.0  # normalisation fixe H
+
+    # Delta saturation
+    delta_s = abs(zone_f["s"] - ref_f["s"]) / 20.0
+
+    # Delta texture
+    delta_tex = abs(zone_f["texture"] - ref_f["texture"]) / 5.0
+
+    # Score final pondéré (tous normalisés, comparables)
+    score = (
+        delta_ab_norm * 0.45 +
+        delta_h_norm  * 0.25 +
+        delta_s       * 0.20 +
+        delta_tex     * 0.10
+    )
+
+    return {
+        "score":       round(score, 2),
+        "delta_ab":    round(float(np.sqrt(raw_da**2 + raw_db**2)), 1),
+        "delta_h":     round(float(dh), 1),
+        "delta_s":     round(abs(zone_f["s"] - ref_f["s"]), 1),
+        "delta_tex":   round(abs(zone_f["texture"] - ref_f["texture"]), 1),
+    }
+
+
+# =============================================
+# COHÉRENCE INTERNE : 3 BANDES
+# Confirme si toute la zone est différente
+# ou juste un reflet/ombre ponctuel
+# =============================================
+def check_coherence(lab, hsv, gray, mask,
+                    xA, yA, xB, yB,
+                    ref_f, nat_a, nat_b):
+    zone_h  = yB - yA
+    band_h  = zone_h // 3
+    scores  = []
+
+    for b in range(3):
+        byA = yA + b * band_h
+        byB = yA + (b + 1) * band_h if b < 2 else yB
+        f   = get_zone_features(lab, hsv, gray, mask, xA, byA, xB, byB)
+        if f is None:
+            continue
+        r = compute_adaptive_score(f, ref_f, nat_a, nat_b)
+        scores.append(r["score"])
+
+    if len(scores) < 2:
+        return 0.0, False
+
+    std_s  = float(np.std(scores))
+    mean_s = float(np.mean(scores))
+
+    # Cohérente + différente = vraie repeinture
+    is_coh = (std_s < 0.4) and (mean_s > 0.5)
+    bonus  = 0.5 if is_coh else 0.0
+    return bonus, is_coh
 
 
 # =========================
@@ -139,10 +258,10 @@ def detect_car_orientation(car_crop):
 
     if total_red > 150:
         if red_left > red_right * 1.35:
-            log.append(f"P1 ROUGE → avant DROITE")
+            log.append("P1 ROUGE → avant DROITE")
             return "right", log
         elif red_right > red_left * 1.35:
-            log.append(f"P1 ROUGE → avant GAUCHE")
+            log.append("P1 ROUGE → avant GAUCHE")
             return "left", log
         else:
             log.append("P1 equilibre, passe P2")
@@ -179,8 +298,6 @@ def detect_car_orientation(car_crop):
     mid         = crop_w // 2
     left_glass  = float(dark_f[:, :mid].sum())
     right_glass = float(dark_f[:, mid:].sum())
-
-    log.append(f"P3 VITRE: gauche={int(left_glass)} droite={int(right_glass)}")
 
     if left_glass > right_glass * 1.15:
         log.append("P3 VITRE → avant GAUCHE")
@@ -268,36 +385,30 @@ def analyse():
             zone_names = ["Arriere", "Portes", "Avant"]
 
         # ===============================================
-        # MASQUE CARROSSERIE
+        # ESPACES COLORIMÉTRIQUES + MASQUE
         # ===============================================
         hsv_full  = cv2.cvtColor(car_crop, cv2.COLOR_BGR2HSV)
         lab_full  = cv2.cvtColor(car_crop, cv2.COLOR_BGR2LAB)
-
-        mask_dark = cv2.inRange(hsv_full, (0, 0, 0),   (180, 255, 45))
-        mask_sky  = cv2.inRange(hsv_full, (0, 0, 210), (180, 18, 255))
-        mask_body = cv2.bitwise_not(cv2.bitwise_or(mask_dark, mask_sky))
-        kernel    = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-        mask_body = cv2.morphologyEx(mask_body, cv2.MORPH_CLOSE, kernel)
+        gray_full = cv2.cvtColor(car_crop, cv2.COLOR_BGR2GRAY)
+        mask_body = build_mask(car_crop)
 
         # ===============================================
-        # RÉFÉRENCE GLOBALE HSV + LAB
+        # RÉFÉRENCE GLOBALE + VARIABILITÉ NATURELLE
+        # La variabilité naturelle = std des canaux a,b
+        # sur toute la carrosserie = ombres + courbures
+        # normales. C'est la "baseline" de cette voiture.
         # ===============================================
-        all_hsv = hsv_full[mask_body > 0]
-        all_lab = lab_full[mask_body > 0]
-
-        if len(all_hsv) < 100:
+        ref_f = get_zone_features(
+            lab_full, hsv_full, gray_full, mask_body,
+            0, 0, crop_w, crop_h
+        )
+        if ref_f is None:
             return jsonify({"error": "No body pixels found"}), 400
 
-        ref_hsv = np.array([
-            float(np.median(all_hsv[:, 0])),
-            float(np.median(all_hsv[:, 1])),
-            float(np.median(all_hsv[:, 2]))
-        ])
-        ref_lab = np.array([
-            float(np.median(all_lab[:, 0])),
-            float(np.median(all_lab[:, 1])),
-            float(np.median(all_lab[:, 2]))
-        ])
+        # Calcul de la variabilité naturelle sur pixels valides
+        vl_all     = lab_full[mask_body > 0]
+        natural_std_a = max(float(np.std(vl_all[:, 1])), 1.0)
+        natural_std_b = max(float(np.std(vl_all[:, 2])), 1.0)
 
         # ===============================================
         # 3 ZONES
@@ -340,15 +451,12 @@ def analyse():
         results_zones = []
         detected = 0
 
-        # ===============================================
-        # BOUCLE ZONES — manquante dans ton code
-        # ===============================================
         for zone in zones:
             xA, xB = zone["xA"], zone["xB"]
             yA, yB = zone["yA"], zone["yB"]
 
-            zone_hsv, zone_lab, px_count = get_zone_color(
-                hsv_full, lab_full, mask_body,
+            z_f = get_zone_features(
+                lab_full, hsv_full, gray_full, mask_body,
                 xA, yA, xB, yB
             )
 
@@ -357,27 +465,54 @@ def analyse():
             abs_x2 = x1 + xB
             abs_y2 = y1 + yB
 
-            if zone_hsv is None:
+            if z_f is None:
                 color_rect  = (150, 150, 150)
                 verdict     = "Non analysable"
-                diff        = 0.0
-                label_score = "0"
+                score_final = 0.0
+                label_score = "N/A"
+                detail      = {}
             else:
-                diff_hsv = float(np.linalg.norm(zone_hsv - ref_hsv))
-                diff_lab = float(np.linalg.norm(zone_lab - ref_lab))
+                # Score adaptatif normalisé
+                sc = compute_adaptive_score(
+                    z_f, ref_f, natural_std_a, natural_std_b
+                )
 
-                # Score combiné : LAB prioritaire (65%) + HSV (35%)
-                diff = (0.35 * diff_hsv) + (0.65 * diff_lab)
-                label_score = str(int(diff))
+                # Cohérence interne 3 bandes
+                bonus_coh, is_coh = check_coherence(
+                    lab_full, hsv_full, gray_full, mask_body,
+                    xA, yA, xB, yB,
+                    ref_f, natural_std_a, natural_std_b
+                )
 
-                if diff_lab > 8 
-                    
-                    color_rect = (0, 165, 255)
-                    verdict    = "Peinture refaite probable ok"
-                    detected  += 1
-                elif diff_lab => 17 and diff_hsv < 26:
+                score_final = round(sc["score"] + bonus_coh, 2)
+                label_score = f"{score_final:.1f}"
+
+                detail = {
+                    "delta_ab":      sc["delta_ab"],
+                    "delta_h":       sc["delta_h"],
+                    "delta_s":       sc["delta_s"],
+                    "delta_texture": sc["delta_tex"],
+                    "bonus_coherence": round(bonus_coh, 2),
+                    "coherente":     is_coh,
+                    "nat_std_a":     round(natural_std_a, 1),
+                    "nat_std_b":     round(natural_std_b, 1)
+                }
+
+                # =======================================
+                # SEUILS ADAPTATIFS — universels
+                # Score normalisé : 1.0 = 1 déviation
+                # naturelle de cette voiture
+                # < 0.8  → OK (variation normale)
+                # 0.8-1.5 → suspect
+                # > 1.5  → repeinture probable
+                # =======================================
+                if score_final > 1.5:
                     color_rect = (0, 0, 255)
-                    verdict    = "Suspicion peinture"
+                    verdict    = "Peinture refaite probable!"
+                    detected  += 1
+                elif score_final > 0.8:
+                    color_rect = (0, 165, 255)
+                    verdict    = "Variation suspecte"
                     detected  += 1
                 else:
                     color_rect = (0, 210, 0)
@@ -396,7 +531,7 @@ def analyse():
                         cv2.FONT_HERSHEY_SIMPLEX,
                         font_scale_big, (255, 255, 255), font_thick_big)
 
-            cv2.putText(final_img, f"Ecart: {label_score}",
+            cv2.putText(final_img, f"Score: {label_score}",
                         (abs_x1 + 8, abs_y1 + int(overlay_h * 0.80)),
                         cv2.FONT_HERSHEY_SIMPLEX,
                         font_scale_med, color_rect, font_thick_big)
@@ -408,24 +543,27 @@ def analyse():
 
             results_zones.append({
                 "zone":    zone["name"],
-                "diff":    round(diff, 1),
-                "pixels":  px_count,
-                "verdict": verdict
+                "score":   score_final,
+                "pixels":  z_f["count"] if z_f else 0,
+                "verdict": verdict,
+                "detail":  detail
             })
 
         # ===============================================
         # SCORE GLOBAL
         # ===============================================
-        diffs = [z["diff"] for z in results_zones if z["diff"] > 0]
-        final_score = int(np.mean(diffs)) if diffs else 0
-        final_score = min(final_score, 100)
+        scores = [z["score"] for z in results_zones if z["score"] > 0]
+        final_score_raw = float(np.mean(scores)) if scores else 0.0
 
-        if final_score < 10:
-            result = "Peinture homogene (OK)"
-        elif final_score < 28:
+        if final_score_raw > 1.5:
+            result = "Difference importante — repeinture probable"
+        elif final_score_raw > 0.8:
             result = "Legeres variations detectees"
         else:
-            result = "Difference importante — repeinture probable"
+            result = "Peinture homogene (OK)"
+
+        # Score sur 100 pour affichage
+        final_score_100 = min(int(final_score_raw * 40), 100)
 
         analysed_name = "analysed_" + filename
         analysed_path = os.path.join(UPLOAD_FOLDER, analysed_name)
@@ -436,22 +574,20 @@ def analyse():
 
         return jsonify({
             "yolo":            yolo_result,
-            "score":           final_score,
+            "score":           final_score_100,
+            "score_raw":       round(final_score_raw, 2),
             "result":          result,
             "zones":           results_zones,
             "zones_detected":  detected,
             "orientation":     orientation,
             "orientation_log": orient_log,
             "image_size":      {"width": orig_w, "height": orig_h},
-            "reference_hsv": {
-                "H": round(ref_hsv[0], 1),
-                "S": round(ref_hsv[1], 1),
-                "V": round(ref_hsv[2], 1)
-            },
-            "reference_lab": {
-                "L": round(ref_lab[0], 1),
-                "A": round(ref_lab[1], 1),
-                "B": round(ref_lab[2], 1)
+            "calibration": {
+                "natural_std_a": round(natural_std_a, 1),
+                "natural_std_b": round(natural_std_b, 1),
+                "ref_a":         round(ref_f["a"], 1),
+                "ref_b":         round(ref_f["b"], 1),
+                "ref_h":         round(ref_f["h"], 1)
             },
             "image_result":    analysed_name,
             "image_url":       request.host_url + "uploads/" + analysed_name
@@ -464,8 +600,5 @@ def analyse():
         }), 500
 
 
-# =========================
-# RUN SERVER
-# =========================
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
