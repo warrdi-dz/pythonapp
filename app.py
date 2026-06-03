@@ -104,6 +104,61 @@ def refine_car_bbox(img, x1, y1, x2, y2):
 # =========================
 # DÉTECTER ORIENTATION
 # =========================
+def straighten_car(car_crop):
+
+    gray = cv2.cvtColor(car_crop, cv2.COLOR_BGR2GRAY)
+
+    edges = cv2.Canny(gray, 50, 150)
+
+    lines = cv2.HoughLinesP(
+        edges,
+        1,
+        np.pi/180,
+        100,
+        minLineLength=120,
+        maxLineGap=20
+    )
+
+    if lines is None:
+        return car_crop, 0
+
+    angles = []
+
+    for line in lines:
+        x1, y1, x2, y2 = line[0]
+
+        angle = np.degrees(
+            np.arctan2(y2-y1, x2-x1)
+        )
+
+        if -30 < angle < 30:
+            angles.append(angle)
+
+    if len(angles) < 5:
+        return car_crop, 0
+
+    median_angle = np.median(angles)
+
+    h, w = car_crop.shape[:2]
+
+    M = cv2.getRotationMatrix2D(
+        (w//2, h//2),
+        median_angle,
+        1.0
+    )
+
+    rotated = cv2.warpAffine(
+        car_crop,
+        M,
+        (w, h),
+        flags=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_REPLICATE
+    )
+
+    return rotated, median_angle
+
+
+
 def detect_car_orientation(car_crop):
     crop_h, crop_w = car_crop.shape[:2]
     log = []
@@ -262,17 +317,19 @@ def analyse():
         # ===============================================
         # AFFINER LE CROP sur l'image originale
         # ===============================================
-        x1, y1, x2, y2 = refine_car_bbox(img_orig, x1, y1, x2, y2)
-
         car_crop = img_orig[y1:y2, x1:x2]
+
         if car_crop.size == 0:
-            return jsonify({"error": "invalid crop"}), 400
+            return jsonify({"error":"invalid crop"}),400
+
+       # Redressement automatique
+        car_crop, detected_angle = straighten_car(car_crop)
 
         crop_h, crop_w = car_crop.shape[:2]
 
-        # ===============================================
-        # ORIENTATION
-        # ===============================================
+# ===============================================
+# ORIENTATION
+# ===============================================
         orientation, orient_log = detect_car_orientation(car_crop)
 
         if orientation == "left":
@@ -446,7 +503,8 @@ def analyse():
             "result":          result,
             "zones":           results_zones,
             "zones_detected":  detected,
-            "orientation":     orientation,
+            "orientation": orientation,
+            "detected_angle": round(float(detected_angle),2),
             "orientation_log": orient_log,
             "image_size":      {"width": orig_w, "height": orig_h},
             "reference_hsv": {
