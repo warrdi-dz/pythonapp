@@ -371,11 +371,12 @@ def analyse():
                 label_score = str(int(diff))
 
                 if diff_lab > 18 and diff_hsv > 14:
-                    color_rect = (0, 0, 255)
-                    verdict    = "Peinture refaite probable"
+                    
+                    color_rect = (0, 165, 255)
+                    verdict    = "Peinture refaite probable ok"
                     detected  += 1
                 elif diff_lab > 12:
-                    color_rect = (0, 165, 255)
+                    color_rect = (0, 0, 255)
                     verdict    = "Suspicion peinture"
                     detected  += 1
                 else:
