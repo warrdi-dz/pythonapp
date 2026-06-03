@@ -506,11 +506,11 @@ def analyse():
                 # 0.8-1.5 → suspect
                 # > 1.5  → repeinture probable
                 # =======================================
-                if score_final < 0.8:
+                if score_final > 1.5:
                     color_rect = (0, 0, 255)
                     verdict    = "Peinture refaite probable!"
                     detected  += 1
-                elif score_final <= 1.5:
+                elif score_final > 0.8:
                     color_rect = (0, 165, 255)
                     verdict    = "Variation suspecte"
                     detected  += 1
