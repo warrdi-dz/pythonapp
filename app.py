@@ -22,47 +22,24 @@ YOLO_H = 500
 # =========================
 # YOLO API CALL
 # =========================
+import base64
+
 def call_yolo(image_path):
     url = "https://warrdi.com/pytho/detect"
 
-    try:
-        with open(image_path, "rb") as f:
-            files = {
-                "image": (
-                    os.path.basename(image_path),
-                    f,
-                    "image/jpeg"
-                )
-            }
+    with open(image_path, "rb") as f:
+        img_b64 = base64.b64encode(f.read()).decode()
 
-            r = requests.post(
-                url,
-                files=files,
-                timeout=20
-            )
-        
-        print("================================")
-        print("YOLO STATUS:", r.status_code)
-        print("YOLO RESPONSE:", r.text)
-        print("================================")
-        print("FINAL URL =", url)
-       
-        print("HEADERS =", r.headers)
-        print("TEXT =", r.text[:500])
-        if r.status_code == 200:
-            return r.json()
+    r = requests.post(
+        url,
+        json={"image": img_b64},
+        timeout=20
+    )
 
-        return {
-            "error": "YOLO failed",
-            "status": r.status_code,
-            "response": r.text
-        }
+    print("STATUS:", r.status_code)
+    print("TEXT:", r.text[:500])
 
-    except Exception as e:
-        print("YOLO EXCEPTION:", str(e))
-        return {
-            "error": str(e)
-        }
+    return r.text
 
 # =========================
 # UPLOADS
