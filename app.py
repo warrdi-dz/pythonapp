@@ -381,17 +381,17 @@ def analyse():
                 verdict     = "Non analysable"
             else:
                 diff = float(np.linalg.norm(zone_color - ref_color))
-
-                if diff >= 14 and diff < 26:
-                    color_rect = (0, 0, 255)
-                verdict = "Attention peinture refaite!"
-                elif diff < 14:
-                     color_rect = (0, 165, 255)
-                verdict = "Legere variation suspecte!"
+                
+                if diff < 15:
+                    color_rect = (0, 210, 0)
+                    verdict = "OK"
+                elif diff < 30:
+                   color_rect = (0, 165, 255)
+                   verdict = "Legere variation"
                 else:
-                     color_rect = (0, 210, 0)
-                     verdict = "OK"
-
+                    color_rect = (0, 0, 255)
+                    verdict = "Suspicion de repeinture"
+                
                 label_score = str(int(diff))
 
             cv2.rectangle(final_img, (abs_x1, abs_y1),
