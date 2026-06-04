@@ -484,7 +484,8 @@ def analyse():
             float(np.median(vl_ref[:, 1])),
             float(np.median(vl_ref[:, 2]))
         ])
-
+        gray_full = cv2.cvtColor(car_crop, cv2.COLOR_BGR2GRAY)
+        ref_texture = cv2.Laplacian(gray_full,cv2.CV_64F).var()
         nat_std_a = max(float(np.std(vl_ref[:, 1])), 1.0)
         nat_std_b = max(float(np.std(vl_ref[:, 2])), 1.0)
 
@@ -525,7 +526,10 @@ def analyse():
             zone_color, px_count = get_zone_color(
                 lab_full, mask_body, xA, yA, xB, yB
             )
-
+            gray_zone = gray_full[yA:yB, xA:xB]
+            texture_score = cv2.Laplacian(gray_zone,cv2.CV_64F).var()
+            texture_diff = abs(texture_score - ref_texture) / max(ref_texture, 1)
+            texture_diff = min(texture_diff, 2.0)
             abs_x1 = x1 + xA
             abs_y1 = y1 + yA
             abs_x2 = x1 + xB
@@ -539,17 +543,15 @@ def analyse():
             else:
                 da   = abs(zone_color[1] - ref_color[1]) / nat_std_a
                 db   = abs(zone_color[2] - ref_color[2]) / nat_std_b
-                diff = float(np.sqrt(da**2 + db**2))
+                color_diff = float(np.sqrt(da**2 + db**2))
+                diff = (color_diff * 0.8) + (texture_diff * 0.2)
                 label_score = f"{diff:.1f}"
-                if diff = 0.1: 
+
+                if diff > 2.2:
                     color_rect = (0, 0, 255)
                     verdict    = "Peinture refaite!"
                     detected  += 1
-                if diff > 1.8: 
-                    color_rect = (0, 0, 255)
-                    verdict    = "Peinture refaite!"
-                    detected  += 1
-                elif diff > 0.9:
+                elif diff > 1.2:
                     color_rect = (0, 165, 255)
                     verdict    = "Variation suspecte"
                     detected  += 1
