@@ -25,7 +25,7 @@ YOLO_H = 500
 import base64
 
 def call_yolo(image_path):
-    url = "https://warrdi.com/pytho/detect"
+    url = "https://warrdi.com/detect"
 
     with open(image_path, "rb") as f:
         img_b64 = base64.b64encode(f.read()).decode()
