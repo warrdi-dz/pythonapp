@@ -40,12 +40,15 @@ def call_yolo(image_path):
                 files=files,
                 timeout=20
             )
-
+        
         print("================================")
         print("YOLO STATUS:", r.status_code)
         print("YOLO RESPONSE:", r.text)
         print("================================")
-
+        print("FINAL URL =", url)
+       
+        print("HEADERS =", r.headers)
+        print("TEXT =", r.text[:500])
         if r.status_code == 200:
             return r.json()
 
