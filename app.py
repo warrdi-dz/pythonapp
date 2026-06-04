@@ -19,34 +19,17 @@ YOLO_H = 500
 # =========================
 # YOLO API CALL
 # =========================
-# =========================
-# YOLO API CALL
-# =========================
-import base64
-
 def call_yolo(image_path):
-    url = "https://warrdi.com/detect"
-
-    with open(image_path, "rb") as f:
-        img_b64 = base64.b64encode(f.read()).decode()
-
-    r = requests.post(
-        url,
-        json={"image": img_b64},
-        timeout=20
-    )
-
-    print("STATUS:", r.status_code)
-    print("TEXT:", r.text[:500])
-
-    if r.status_code == 200:
-        return r.json()
-
-    return {
-        "error": "YOLO failed",
-        "status": r.status_code,
-        "response": r.text
-    }
+    url = "https://warrdi.com/pytho/detect"
+    try:
+        with open(image_path, "rb") as f:
+            files = {"image": f}
+            r = requests.post(url, files=files, timeout=20)
+        if r.status_code == 200:
+            return r.json()
+        return {"error": "YOLO failed", "status": r.status_code}
+    except Exception as e:
+        return {"error": "YOLO exception", "details": str(e)}
 
 # =========================
 # UPLOADS
@@ -247,7 +230,7 @@ def analyse():
         cv2.imwrite(resized_path, img_yolo)
 
         yolo_result = call_yolo(resized_path)
-        print("YOLO RESULT =", yolo_result, flush=True)
+
         detections = yolo_result.get("detections", [])
         cars = [d for d in detections if d.get("class") == 2]
         if not cars:
