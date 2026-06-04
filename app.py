@@ -21,16 +21,27 @@ YOLO_H = 500
 # =========================
 def call_yolo(image_path):
     url = "https://warrdi.com/pytho/detect"
+
     try:
         with open(image_path, "rb") as f:
             files = {"image": f}
             r = requests.post(url, files=files, timeout=20)
+
+        # 👇 ICI tu ajoutes les logs
+        print("STATUS:", r.status_code)
+        print("TEXT:", r.text[:500])
+
         if r.status_code == 200:
             return r.json()
-        return {"error": "YOLO failed", "status": r.status_code}
+
+        return {
+            "error": "YOLO failed",
+            "status": r.status_code,
+            "response": r.text
+        }
+
     except Exception as e:
         return {"error": "YOLO exception", "details": str(e)}
-
 # =========================
 # UPLOADS
 # =========================
