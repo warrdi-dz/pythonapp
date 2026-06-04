@@ -41,29 +41,11 @@ def home():
 
 # =============================================
 # MASQUE CARROSSERIE ANTI-OMBRES
-#
-# Le problème des ombres :
-# Une ombre sur carrosserie = zone sombre MAIS
-# avec la MÊME teinte que la carrosserie autour.
-# Un poteau / arbre / sol projette une ombre
-# qui a une forme géométrique ou organique.
-#
-# Solution : après avoir créé le masque de base,
-# on détecte les régions sombres CONNEXES et on
-# regarde si leur forme est suspecte (trop allongée,
-# trop petite, bord droit = ombre de poteau).
-# On les exclut du masque.
 # =============================================
 def build_body_mask(car_crop, hsv):
-
-    # --- Exclusions de base ---
-    # Trop sombre = vitres, pneus
     mask_dark = cv2.inRange(hsv, (0, 0,   0), (180, 255,  45))
-    # Reflets blancs forts = soleil
     mask_refl = cv2.inRange(hsv, (0, 0, 218), (180, 255, 255))
-    # Ciel / fond blanc
     mask_sky  = cv2.inRange(hsv, (0, 0, 210), (180,  20, 255))
-    # Chrome / plastique (faible saturation)
     mask_chro = cv2.inRange(hsv, (0, 0,   0), (180,  28, 255))
 
     exclude   = cv2.bitwise_or(mask_dark, mask_refl)
@@ -75,83 +57,44 @@ def build_body_mask(car_crop, hsv):
     mask_body = cv2.morphologyEx(mask_body, cv2.MORPH_CLOSE, k, iterations=2)
     mask_body = cv2.morphologyEx(mask_body, cv2.MORPH_OPEN,  k, iterations=1)
 
-    # -----------------------------------------------
-    # DÉTECTION ET SUPPRESSION DES OMBRES
-    #
-    # Une ombre sur carrosserie = zone où V est
-    # nettement plus bas que ses voisins MAIS
-    # H et S restent similaires à la carrosserie.
-    #
-    # On détecte les zones "semi-sombres" (V entre
-    # 45 et 110) qui sont incluses dans le masque
-    # carrosserie, puis on analyse leur forme :
-    # - ratio largeur/hauteur extrême → poteau
-    # - surface trop petite → bruit
-    # - forme très allongée → ombre d'arbre
-    # -----------------------------------------------
-    gray = cv2.cvtColor(car_crop, cv2.COLOR_BGR2GRAY)
-    h_c, w_c = car_crop.shape[:2]
+    h_c, w_c  = car_crop.shape[:2]
 
-    # Zones semi-sombres sur carrosserie
-    mask_semi = cv2.inRange(hsv, (0, 0, 45), (180, 255, 115))
-    # Garder seulement celles qui sont dans la carrosserie
+    # CORRECTION 3 : seuil élargi pour capturer plus d'ombres
+    mask_semi           = cv2.inRange(hsv, (0, 0, 35), (180, 255, 130))
     mask_shadow_on_body = cv2.bitwise_and(mask_semi, mask_body)
 
-    # Morphologie pour regrouper les zones proches
-    ks = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+    ks                  = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
     mask_shadow_on_body = cv2.morphologyEx(
         mask_shadow_on_body, cv2.MORPH_CLOSE, ks, iterations=3
     )
 
-    # Trouver les contours des zones d'ombre
     contours, _ = cv2.findContours(
         mask_shadow_on_body, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
     )
 
     mask_shadows_to_remove = np.zeros_like(mask_body)
-    total_body_area = max(cv2.countNonZero(mask_body), 1)
+    total_body_area        = max(cv2.countNonZero(mask_body), 1)
 
     for cnt in contours:
         area = cv2.contourArea(cnt)
         if area < 200:
-            continue  # trop petit = bruit
+            continue
 
-        x, y, w, h = cv2.boundingRect(cnt)
+        x, y, w, h    = cv2.boundingRect(cnt)
+        ratio_hw      = h / max(w, 1)
+        ratio_wh      = w / max(h, 1)
+        area_ratio    = area / total_body_area
 
-        # Ratio : ombre de poteau = très allongée verticalement
-        ratio_hw = h / max(w, 1)
-        ratio_wh = w / max(h, 1)
-
-        # Surface relative à la carrosserie
-        area_ratio = area / total_body_area
-
-        # Ombre de poteau : très haute et étroite
         is_pole_shadow = (ratio_hw > 3.0) and (w < w_c * 0.12)
-
-        # Ombre d'arbre / bâtiment : grande zone très allongée
         is_long_shadow = (ratio_wh > 4.0) and (area_ratio > 0.04)
-
-        # Ombre ronde compacte (arbre, personne)
-        # qui occupe moins de 8% de la carrosserie
-        is_small_round = (area_ratio < 0.06) and (ratio_hw < 1.8) and (ratio_wh < 1.8)
-
-        # Ombre qui touche le bord inférieur du crop
-        # (ombre du sol qui remonte)
         touches_bottom = (y + h) > (h_c * 0.88)
 
         if is_pole_shadow or is_long_shadow or touches_bottom:
-            # Supprimer cette zone du masque carrosserie
-            cv2.drawContours(
-                mask_shadows_to_remove, [cnt], -1, 255, -1
-            )
+            cv2.drawContours(mask_shadows_to_remove, [cnt], -1, 255, -1)
 
-    # Appliquer la suppression des ombres
     mask_body = cv2.bitwise_and(
-        mask_body,
-        cv2.bitwise_not(mask_shadows_to_remove)
+        mask_body, cv2.bitwise_not(mask_shadows_to_remove)
     )
-
-    # Morphologie finale pour lisser
     mask_body = cv2.morphologyEx(mask_body, cv2.MORPH_CLOSE, k, iterations=1)
 
     return mask_body
@@ -159,7 +102,6 @@ def build_body_mask(car_crop, hsv):
 
 # =============================================
 # COULEUR LAB MÉDIANE ANTI-REFLETS
-# Exclut les 10% extrêmes de luminosité
 # =============================================
 def get_zone_color(lab_img, mask, xA, yA, xB, yB):
     zm    = mask[yA:yB, xA:xB]
@@ -196,7 +138,6 @@ def detect_view(car_crop):
 
     ratio_wh = crop_w / max(crop_h, 1)
 
-    # Feux arrière rouges
     mr1      = cv2.inRange(hsv, (0,   60, 60), (12,  255, 255))
     mr2      = cv2.inRange(hsv, (168, 60, 60), (180, 255, 255))
     mask_red = cv2.bitwise_or(mr1, mr2)
@@ -204,7 +145,6 @@ def detect_view(car_crop):
     red_L    = cv2.countNonZero(mask_red[:, :crop_w//2])
     red_R    = cv2.countNonZero(mask_red[:, crop_w//2:])
 
-    # Phares avant (seulement dans le tiers bas)
     mw1       = cv2.inRange(hsv, (0,  0,  195), (180, 50, 255))
     mw2       = cv2.inRange(hsv, (15, 40, 195), (40, 180, 255))
     ph_zone   = cv2.bitwise_or(mw1, mw2)[int(crop_h*0.45):, :]
@@ -212,7 +152,6 @@ def detect_view(car_crop):
     white_L   = cv2.countNonZero(ph_zone[:, :crop_w//2])
     white_R   = cv2.countNonZero(ph_zone[:, crop_w//2:])
 
-    # Vitres (partie haute)
     top       = gray[int(crop_h*0.05):int(crop_h*0.55), :]
     dk        = (top < 75).astype(np.uint8)
     dk_f      = cv2.GaussianBlur(dk.astype(np.float32), (15, 15), 0)
@@ -226,7 +165,6 @@ def detect_view(car_crop):
                f"blanc={white_tot} vitres={int(glass_tot)} "
                f"portes={has_doors}")
 
-    # CAS 1 : Côté complet avec portes
     if has_doors and ratio_wh > 1.4:
         log.append("→ SIDE FULL")
         if red_tot > 200:
@@ -243,17 +181,14 @@ def detect_view(car_crop):
             return "side_full", "left", log
         return "side_full", "right", log
 
-    # CAS 2 : Avant seulement
     if white_tot > 120 and red_tot < 150 and not has_doors:
         log.append("→ FRONT ONLY")
         return "front_only", ("left" if white_L > white_R else "right"), log
 
-    # CAS 3 : Arrière seulement
     if red_tot > 150 and white_tot < 100 and not has_doors:
         log.append("→ REAR ONLY")
         return "rear_only", ("left" if red_L > red_R else "right"), log
 
-    # CAS 4 : 3/4 arrière
     if red_tot > 100 and ratio_wh < 1.5:
         log.append("→ REAR 3Q")
         return "rear_3q", ("left" if red_L > red_R else "right"), log
@@ -263,98 +198,124 @@ def detect_view(car_crop):
 
 
 # =============================================
-# DÉFINIR LES ZONES SELON LA VUE
+# CORRECTION 6 : GRILLE FINE 4x3 = 12 ZONES
+# Au lieu de 3 grandes zones, on découpe en
+# 12 petites zones qui suivent les vraies pièces.
+# Une repeinture partielle sur 20cm sera détectée.
+#
+# Les noms des zones suivent la logique :
+# - Vue côté : col 0=aile av, 1-2=portes, 3=aile ar
+# - Lignes : haut=toit/vitres, milieu=carrosserie,
+#            bas=bas de caisse
+# On filtre les zones avec trop peu de pixels valides.
 # =============================================
-def define_zones(view_type, orientation, crop_h, crop_w):
-    band_y1 = int(crop_h * 0.08)
-    band_y2 = int(crop_h * 0.90)
+def define_zones_grid(view_type, orientation, crop_h, crop_w, mask_body):
+    """
+    Crée une grille 4 colonnes x 3 lignes = 12 zones.
+    Les noms sont adaptés selon la vue et l'orientation.
+    Les zones avec moins de 200 pixels valides sont ignorées.
+    """
+    # Bande carrosserie (exclut toit et bas roues)
+    y1_band = int(crop_h * 0.10)
+    y2_band = int(crop_h * 0.88)
 
+    band_h = y2_band - y1_band
+    band_w = crop_w
+
+    # 4 colonnes, 3 lignes
+    cols = 4
+    rows = 3
+    cw   = band_w // cols
+    ch   = band_h // rows
+
+    # Noms des colonnes selon vue et orientation
     if view_type == "side_full":
-        cut1 = int(crop_w * 0.25)
-        cut2 = int(crop_w * 0.65)
         if orientation == "left":
-            return [
-                {"name": "Aile avant",   "xA": 0,    "xB": cut1,   "yA": band_y1, "yB": band_y2},
-                {"name": "Portes",       "xA": cut1, "xB": cut2,   "yA": band_y1, "yB": band_y2},
-                {"name": "Aile arriere", "xA": cut2, "xB": crop_w, "yA": band_y1, "yB": band_y2},
-            ]
+            col_names = ["Aile av.", "Porte av.", "Porte ar.", "Aile ar."]
         else:
-            return [
-                {"name": "Aile arriere", "xA": 0,    "xB": cut1,   "yA": band_y1, "yB": band_y2},
-                {"name": "Portes",       "xA": cut1, "xB": cut2,   "yA": band_y1, "yB": band_y2},
-                {"name": "Aile avant",   "xA": cut2, "xB": crop_w, "yA": band_y1, "yB": band_y2},
-            ]
-
+            col_names = ["Aile ar.", "Porte ar.", "Porte av.", "Aile av."]
     elif view_type == "front_only":
-        cap_y1 = int(crop_h * 0.08)
-        cap_y2 = int(crop_h * 0.52)
-        pc_y1  = int(crop_h * 0.60)
-        pc_y2  = int(crop_h * 0.92)
         if orientation == "left":
-            ax2 = int(crop_w * 0.38)
-            cx1 = int(crop_w * 0.30)
-            return [
-                {"name": "Capot avant",    "xA": cx1, "xB": crop_w, "yA": cap_y1, "yB": cap_y2},
-                {"name": "Aile avant",     "xA": 0,   "xB": ax2,    "yA": cap_y1, "yB": pc_y2},
-                {"name": "Pare-chocs av.", "xA": cx1, "xB": crop_w, "yA": pc_y1,  "yB": pc_y2},
-            ]
+            col_names = ["Aile av. G", "Capot G", "Capot D", "Pare-ch. av."]
         else:
-            ax1 = int(crop_w * 0.62)
-            cx2 = int(crop_w * 0.70)
-            return [
-                {"name": "Capot avant",    "xA": 0,   "xB": cx2,    "yA": cap_y1, "yB": cap_y2},
-                {"name": "Aile avant",     "xA": ax1, "xB": crop_w, "yA": cap_y1, "yB": pc_y2},
-                {"name": "Pare-chocs av.", "xA": 0,   "xB": cx2,    "yA": pc_y1,  "yB": pc_y2},
-            ]
-
-    elif view_type == "rear_only":
-        co_y1 = int(crop_h * 0.08)
-        co_y2 = int(crop_h * 0.52)
-        pc_y1 = int(crop_h * 0.62)
-        pc_y2 = int(crop_h * 0.92)
+            col_names = ["Pare-ch. av.", "Capot G", "Capot D", "Aile av. D"]
+    elif view_type in ("rear_only", "rear_3q"):
         if orientation == "left":
-            ax2 = int(crop_w * 0.40)
-            cx1 = int(crop_w * 0.25)
-            return [
-                {"name": "Coffre / hayon",  "xA": cx1, "xB": crop_w, "yA": co_y1, "yB": co_y2},
-                {"name": "Aile arriere",    "xA": 0,   "xB": ax2,    "yA": co_y1, "yB": pc_y2},
-                {"name": "Pare-chocs arr.", "xA": cx1, "xB": crop_w, "yA": pc_y1, "yB": pc_y2},
-            ]
+            col_names = ["Aile ar. G", "Coffre G", "Coffre D", "Aile ar. D"]
         else:
-            ax1 = int(crop_w * 0.60)
-            cx2 = int(crop_w * 0.75)
-            return [
-                {"name": "Coffre / hayon",  "xA": 0,   "xB": cx2,    "yA": co_y1, "yB": co_y2},
-                {"name": "Aile arriere",    "xA": ax1, "xB": crop_w, "yA": co_y1, "yB": pc_y2},
-                {"name": "Pare-chocs arr.", "xA": 0,   "xB": cx2,    "yA": pc_y1, "yB": pc_y2},
-            ]
+            col_names = ["Aile ar. D", "Coffre D", "Coffre G", "Aile ar. G"]
+    else:
+        col_names = ["Zone 1", "Zone 2", "Zone 3", "Zone 4"]
 
-    elif view_type == "rear_3q":
-        co_y2 = int(crop_h * 0.50)
-        pc_y1 = int(crop_h * 0.60)
-        if orientation == "left":
-            cut = int(crop_w * 0.42)
-            return [
-                {"name": "Coffre / hayon",  "xA": cut, "xB": crop_w, "yA": band_y1, "yB": co_y2},
-                {"name": "Aile arriere",    "xA": 0,   "xB": cut,    "yA": band_y1, "yB": band_y2},
-                {"name": "Pare-chocs arr.", "xA": cut, "xB": crop_w, "yA": pc_y1,   "yB": band_y2},
-            ]
+    row_names = ["Haut", "Milieu", "Bas"]
+
+    zones = []
+    for r in range(rows):
+        for c in range(cols):
+            xA = c * cw
+            xB = (c + 1) * cw if c < cols - 1 else band_w
+            yA = y1_band + r * ch
+            yB = y1_band + (r + 1) * ch if r < rows - 1 else y2_band
+
+            # Vérifier qu'il y a assez de pixels valides
+            zm   = mask_body[yA:yB, xA:xB]
+            npx  = cv2.countNonZero(zm)
+
+            if npx < 200:
+                continue  # zone trop vide (vitre, roue) → ignorée
+
+            name = f"{col_names[c]} {row_names[r]}"
+            zones.append({
+                "name": name,
+                "xA": xA, "xB": xB,
+                "yA": yA, "yB": yB,
+                "col": c,  "row": r
+            })
+
+    # Si trop peu de zones valides, fallback 3 zones
+    if len(zones) < 3:
+        y1 = int(crop_h * 0.10)
+        y2 = int(crop_h * 0.88)
+        c1 = int(crop_w * 0.33)
+        c2 = int(crop_w * 0.67)
+        if view_type == "side_full" and orientation == "left":
+            names = ["Aile avant", "Portes", "Aile arriere"]
+        elif view_type == "side_full":
+            names = ["Aile arriere", "Portes", "Aile avant"]
         else:
-            cut = int(crop_w * 0.58)
-            return [
-                {"name": "Coffre / hayon",  "xA": 0,   "xB": cut,    "yA": band_y1, "yB": co_y2},
-                {"name": "Aile arriere",    "xA": cut, "xB": crop_w, "yA": band_y1, "yB": band_y2},
-                {"name": "Pare-chocs arr.", "xA": 0,   "xB": cut,    "yA": pc_y1,   "yB": band_y2},
-            ]
+            names = ["Zone gauche", "Zone centre", "Zone droite"]
+        return [
+            {"name": names[0], "xA": 0,  "xB": c1,       "yA": y1, "yB": y2, "col":0,"row":0},
+            {"name": names[1], "xA": c1, "xB": c2,        "yA": y1, "yB": y2, "col":1,"row":0},
+            {"name": names[2], "xA": c2, "xB": crop_w,    "yA": y1, "yB": y2, "col":2,"row":0},
+        ]
 
-    # Fallback
-    cut1 = int(crop_w * 0.33)
-    cut2 = int(crop_w * 0.67)
-    return [
-        {"name": "Zone gauche",  "xA": 0,    "xB": cut1,   "yA": band_y1, "yB": band_y2},
-        {"name": "Zone centre",  "xA": cut1, "xB": cut2,   "yA": band_y1, "yB": band_y2},
-        {"name": "Zone droite",  "xA": cut2, "xB": crop_w, "yA": band_y1, "yB": band_y2},
-    ]
+    return zones
+
+
+# =============================================
+# CONSOLIDER LES RÉSULTATS DES 12 ZONES
+# Regrouper par colonne (pièce) pour le résumé
+# et l'affichage des grands rectangles
+# =============================================
+def consolidate_by_piece(zone_results, cols=4):
+    """
+    Regroupe les scores des petites zones par colonne
+    (= par pièce de carrosserie).
+    Retourne un dict col → score_moyen, verdict, zones.
+    """
+    by_col = {}
+    for z in zone_results:
+        c = z.get("col", 0)
+        if c not in by_col:
+            by_col[c] = []
+        by_col[c].append(z["score"])
+
+    result = {}
+    for c, scores in by_col.items():
+        mean_s = float(np.mean(scores)) if scores else 0.0
+        result[c] = round(mean_s, 2)
+    return result
 
 
 # =========================
@@ -453,18 +414,17 @@ def analyse():
 
         crop_h, crop_w = car_crop.shape[:2]
 
-        # ===============================================
-        # VUE + ZONES
-        # ===============================================
         view_type, orientation, view_log = detect_view(car_crop)
-        zones = define_zones(view_type, orientation, crop_h, crop_w)
 
-        # ===============================================
-        # MASQUE ANTI-OMBRES + ESPACES COLORIMÉTRIQUES
-        # ===============================================
         hsv_full  = cv2.cvtColor(car_crop, cv2.COLOR_BGR2HSV)
         lab_full  = cv2.cvtColor(car_crop, cv2.COLOR_BGR2LAB)
+        gray_full = cv2.cvtColor(car_crop, cv2.COLOR_BGR2GRAY)
         mask_body = build_body_mask(car_crop, hsv_full)
+
+        # CORRECTION 6 : grille 4x3
+        zones = define_zones_grid(
+            view_type, orientation, crop_h, crop_w, mask_body
+        )
 
         # ===============================================
         # RÉFÉRENCE GLOBALE LAB (percentiles 10-90)
@@ -484,40 +444,30 @@ def analyse():
             float(np.median(vl_ref[:, 1])),
             float(np.median(vl_ref[:, 2]))
         ])
-        gray_full = cv2.cvtColor(car_crop, cv2.COLOR_BGR2GRAY)
-        ref_texture = cv2.Laplacian(gray_full,cv2.CV_64F).var()
+
         nat_std_a = max(float(np.std(vl_ref[:, 1])), 1.0)
         nat_std_b = max(float(np.std(vl_ref[:, 2])), 1.0)
+
+        # CORRECTION 2 : texture ref sur masque carrosserie seulement
+        lap_full    = cv2.Laplacian(gray_full, cv2.CV_64F)
+        ref_texture = float(np.var(lap_full[mask_body > 0]))
+        ref_texture = max(ref_texture, 1.0)
 
         # ===============================================
         # DESSIN
         # ===============================================
         final_img      = img_orig.copy()
-        thick_box      = max(3, int(5 * min(scale_x, scale_y)))
+        thick_box      = max(2, int(3 * min(scale_x, scale_y)))
         thick_line     = max(1, int(1 * min(scale_x, scale_y)))
-        font_scale_big = max(0.55, 0.55 * min(scale_x, scale_y))
-        font_scale_med = max(0.45, 0.45 * min(scale_x, scale_y))
-        font_thick_big = max(2,    int(2  * min(scale_x, scale_y)))
-        overlay_h      = max(55,   int(55 * scale_y))
+        font_scale_big = max(0.40, 0.42 * min(scale_x, scale_y))
+        font_scale_med = max(0.32, 0.34 * min(scale_x, scale_y))
+        font_thick_big = max(1,    int(1  * min(scale_x, scale_y)))
+        overlay_h      = max(40,   int(42 * scale_y))
 
         cv2.rectangle(final_img, (x1, y1), (x2, y2), (220, 220, 220), thick_line)
 
-        drawn_x = set()
-        step = max(10, int(12 * scale_y))
-        dash = max(4,  int(6  * scale_y))
-        for zone in zones:
-            for cx in [zone["xA"], zone["xB"]]:
-                if cx in drawn_x or cx == 0 or cx == crop_w:
-                    continue
-                drawn_x.add(cx)
-                for dy in range(y1 + zone["yA"], y1 + zone["yB"], step):
-                    cv2.line(final_img,
-                             (x1 + cx, dy),
-                             (x1 + cx, dy + dash),
-                             (255, 255, 255), thick_line)
-
         results_zones = []
-        detected = 0
+        detected      = 0
 
         for zone in zones:
             xA, xB = zone["xA"], zone["xB"]
@@ -526,10 +476,21 @@ def analyse():
             zone_color, px_count = get_zone_color(
                 lab_full, mask_body, xA, yA, xB, yB
             )
-            gray_zone = gray_full[yA:yB, xA:xB]
-            texture_score = cv2.Laplacian(gray_zone,cv2.CV_64F).var()
-            texture_diff = abs(texture_score - ref_texture) / max(ref_texture, 1)
+
+            # CORRECTION 1 : texture sur masque seulement
+            zm_zone   = mask_body[yA:yB, xA:xB]
+            gz_zone   = gray_full[yA:yB, xA:xB]
+            lap_zone  = cv2.Laplacian(gz_zone, cv2.CV_64F)
+            lap_valid = lap_zone[zm_zone > 0]
+
+            if len(lap_valid) > 100:
+                texture_score = float(np.var(lap_valid))
+            else:
+                texture_score = ref_texture
+
+            texture_diff = abs(texture_score - ref_texture) / ref_texture
             texture_diff = min(texture_diff, 2.0)
+
             abs_x1 = x1 + xA
             abs_y1 = y1 + yA
             abs_x2 = x1 + xB
@@ -539,55 +500,64 @@ def analyse():
                 color_rect  = (150, 150, 150)
                 label_score = "N/A"
                 diff        = 0.0
-                verdict     = "Non analysable"
+                verdict     = "N/A"
             else:
-                da   = abs(zone_color[1] - ref_color[1]) / nat_std_a
-                db   = abs(zone_color[2] - ref_color[2]) / nat_std_b
+                da         = abs(zone_color[1] - ref_color[1]) / nat_std_a
+                db         = abs(zone_color[2] - ref_color[2]) / nat_std_b
                 color_diff = float(np.sqrt(da**2 + db**2))
-                diff = (color_diff * 0.8) + (texture_diff * 0.2)
+
+                # CORRECTION 4 : pondération 85/15
+                diff = (color_diff * 0.85) + (texture_diff * 0.15)
                 label_score = f"{diff:.1f}"
 
-                if diff > 2.2:
+                # CORRECTION 5 : seuils abaissés
+                if diff > 2.0:
                     color_rect = (0, 0, 255)
-                    verdict    = "Peinture refaite!"
+                    verdict    = "Repeinture!"
                     detected  += 1
-                elif diff > 1.2:
+                elif diff > 1.0:
                     color_rect = (0, 165, 255)
-                    verdict    = "Variation suspecte"
+                    verdict    = "Suspect"
                     detected  += 1
                 else:
                     color_rect = (0, 210, 0)
                     verdict    = "OK"
 
+            # Dessin petit rectangle de zone
             cv2.rectangle(final_img, (abs_x1, abs_y1),
                           (abs_x2, abs_y2), color_rect, thick_box)
 
+            # Fond label
             overlay = final_img.copy()
             cv2.rectangle(overlay, (abs_x1, abs_y1),
                           (abs_x2, abs_y1 + overlay_h), (0, 0, 0), -1)
-            cv2.addWeighted(overlay, 0.5, final_img, 0.5, 0, final_img)
+            cv2.addWeighted(overlay, 0.45, final_img, 0.55, 0, final_img)
 
-            cv2.putText(final_img, zone["name"],
-                        (abs_x1 + 8, abs_y1 + int(overlay_h * 0.40)),
+            # Nom zone (court)
+            short_name = zone["name"].replace(" Milieu","").replace(" Haut","▲").replace(" Bas","▼")
+            cv2.putText(final_img, short_name,
+                        (abs_x1 + 3, abs_y1 + int(overlay_h * 0.45)),
                         cv2.FONT_HERSHEY_SIMPLEX,
                         font_scale_big, (255, 255, 255), font_thick_big)
 
-            cv2.putText(final_img, f"Score: {label_score}",
-                        (abs_x1 + 8, abs_y1 + int(overlay_h * 0.80)),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        font_scale_med, color_rect, font_thick_big)
-
-            cv2.putText(final_img, verdict,
-                        (abs_x1 + 8, abs_y2 - int(10 * scale_y)),
+            cv2.putText(final_img, f"{label_score} {verdict}",
+                        (abs_x1 + 3, abs_y1 + int(overlay_h * 0.88)),
                         cv2.FONT_HERSHEY_SIMPLEX,
                         font_scale_med, color_rect, font_thick_big)
 
             results_zones.append({
                 "zone":    zone["name"],
+                "col":     zone.get("col", 0),
+                "row":     zone.get("row", 0),
                 "score":   round(diff, 2),
                 "pixels":  px_count,
                 "verdict": verdict
             })
+
+        # ===============================================
+        # CONSOLIDER PAR PIÈCE (pour le résumé JSON)
+        # ===============================================
+        piece_scores = consolidate_by_piece(results_zones)
 
         # ===============================================
         # SCORE GLOBAL
@@ -596,9 +566,9 @@ def analyse():
         score_raw = float(np.mean(scores)) if scores else 0.0
         score_100 = min(int(score_raw * 40), 100)
 
-        if score_raw > 1.8:
+        if score_raw > 2.0:
             result = "Difference importante — repeinture probable"
-        elif score_raw > 0.9:
+        elif score_raw > 1.0:
             result = "Legeres variations detectees"
         else:
             result = "Peinture homogene (OK)"
@@ -611,25 +581,27 @@ def analyse():
             os.remove(resized_path)
 
         return jsonify({
-            "yolo":          yolo_result,
-            "score":         score_100,
-            "score_raw":     round(score_raw, 2),
-            "result":        result,
-            "zones":         results_zones,
-            "zones_detected":detected,
-            "view_type":     view_type,
-            "orientation":   orientation,
-            "view_log":      view_log,
-            "image_size":    {"width": orig_w, "height": orig_h},
+            "yolo":           yolo_result,
+            "score":          score_100,
+            "score_raw":      round(score_raw, 2),
+            "result":         result,
+            "zones":          results_zones,
+            "piece_scores":   piece_scores,
+            "zones_detected": detected,
+            "view_type":      view_type,
+            "orientation":    orientation,
+            "view_log":       view_log,
+            "image_size":     {"width": orig_w, "height": orig_h},
             "calibration": {
-                "nat_std_a": round(nat_std_a, 1),
-                "nat_std_b": round(nat_std_b, 1),
-                "ref_L":     round(ref_color[0], 1),
-                "ref_a":     round(ref_color[1], 1),
-                "ref_b":     round(ref_color[2], 1)
+                "nat_std_a":   round(nat_std_a, 1),
+                "nat_std_b":   round(nat_std_b, 1),
+                "ref_L":       round(ref_color[0], 1),
+                "ref_a":       round(ref_color[1], 1),
+                "ref_b":       round(ref_color[2], 1),
+                "ref_texture": round(ref_texture, 1)
             },
-            "image_result":  analysed_name,
-            "image_url":     request.host_url + "uploads/" + analysed_name
+            "image_result":   analysed_name,
+            "image_url":      request.host_url + "uploads/" + analysed_name
         })
 
     except Exception as e:
