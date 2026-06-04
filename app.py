@@ -26,26 +26,29 @@ import requests
 def call_yolo(image_path):
     url = "https://warrdi.com/pytho/detect"
 
-    with open(image_path, "rb") as f:
-        file_bytes = f.read()
+    try:
+        with open(image_path, "rb") as f:
+            files = {"image": f}
+            r = requests.post(url, files=files, timeout=20)
 
-    files = {
-        "image": ("image.jpg", file_bytes, "image/jpeg")
-    }
+        # 🔴 DEBUG ICI (IMPORTANT)
+        print("STATUS:", r.status_code)
+        print("TEXT:", r.text[:500])
 
-    r = requests.post(url, files=files)
+        print("HEADERS:", r.request.headers)
+        print("BODY:", r.request.body[:200] if r.request.body else None)
 
-    print("STATUS:", r.status_code)
-    print("TEXT:", r.text[:500])
+        if r.status_code == 200:
+            return r.json()
 
-    if r.status_code == 200:
-        return r.json()
+        return {
+            "error": "YOLO failed",
+            "status": r.status_code,
+            "response": r.text
+        }
 
-    return {
-        "error": "YOLO failed",
-        "status": r.status_code,
-        "response": r.text
-    }
+    except Exception as e:
+        return {"error": "YOLO exception", "details": str(e)}
 # =========================
 # UPLOADS
 # =========================
