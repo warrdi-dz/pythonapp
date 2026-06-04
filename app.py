@@ -285,21 +285,13 @@ def analyse():
         # ===============================================
         hsv_full  = cv2.cvtColor(car_crop, cv2.COLOR_BGR2HSV)
         mask_dark = cv2.inRange(hsv_full, (0, 0, 0),   (180, 255, 45))
+        # Ombres fortes (poteau, arbre, mur...)
+        mask_shadow = cv2.inRange(hsv_full,(0, 20, 0),(180, 255, 80))
+        mask_body = cv2.bitwise_and(mask_body,cv2.bitwise_not(mask_shadow))
         mask_sky  = cv2.inRange(hsv_full, (0, 0, 210), (180, 18, 255))
         mask_body = cv2.bitwise_not(cv2.bitwise_or(mask_dark, mask_sky))
-        # Ombre 
-        h, s, v = cv2.split(hsv_full)
-        mask_shadow = cv2.inRange(v,0,70)
-        mask_body = cv2.bitwise_and(mask_body,cv2.bitwise_not(mask_shadow))
-        # Reflets
-        mask_reflect = cv2.inRange(v,220,255)
-        mask_body = cv2.bitwise_and(mask_body,cv2.bitwise_not(mask_reflect))
-        # Vitres
-        mask_glass = cv2.inRange(hsv_full,(0, 0, 0),(180, 80, 120))
-        mask_body = cv2.bitwise_and(mask_body,cv2.bitwise_not(mask_glass))
-        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(5, 5))
-        mask_body = cv2.morphologyEx(mask_body,cv2.MORPH_CLOSE,kernel,iterations=2)
-        
+        kernel    = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        mask_body = cv2.morphologyEx(mask_body, cv2.MORPH_CLOSE, kernel)
 
         # ===============================================
         # MOYENNE GLOBALE
@@ -381,17 +373,19 @@ def analyse():
                 verdict     = "Non analysable"
             else:
                 diff = float(np.linalg.norm(zone_color - ref_color))
-                
-                if diff < 15:
-                    color_rect = (0, 210, 0)
-                    verdict = "OK"
-                elif diff < 30:
-                   color_rect = (0, 165, 255)
-                   verdict = "Legere variation"
-                else:
+
+                if diff >= 14 and diff < 26:
                     color_rect = (0, 0, 255)
-                    verdict = "Suspicion de repeinture"
-                
+                    verdict    = "Attention peinture refaite!"
+                elif diff < 14:
+                    color_rect = (0, 165, 255)
+                    verdict    = "Legere variation suspecte!"
+                    detected  += 1
+                else:
+                    color_rect = (0, 210, 0)
+                    verdict    = "OK"
+                    detected  += 1
+
                 label_score = str(int(diff))
 
             cv2.rectangle(final_img, (abs_x1, abs_y1),
