@@ -60,7 +60,10 @@ def uploads(filename):
 def home():
     return jsonify({"status": "OK", "message": "GARAGE PRO V4 API"})
 
-
+@app.route("/detect", methods=["POST"])
+def detect():
+    print("🔥 YOLO HIT OK")
+    return jsonify({"ok": True})
 # =============================================
 # MASQUE CARROSSERIE ANTI-OMBRES
 # =============================================
