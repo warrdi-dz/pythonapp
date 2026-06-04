@@ -382,7 +382,7 @@ def analyse():
         resized_path = os.path.join(UPLOAD_FOLDER, "resized_" + filename)
         cv2.imwrite(resized_path, img_yolo)
         yolo_result  = call_yolo(resized_path)
-
+        print("YOLO RESULT =", yolo_result, flush=True)
         detections = yolo_result.get("detections", [])
         cars = [d for d in detections if d.get("class") == 2]
         if not cars:
