@@ -21,19 +21,31 @@ YOLO_H = 500
 import base64
 
 
+import requests
+
 def call_yolo(image_path):
     url = "https://warrdi.com/pytho/detect"
 
     with open(image_path, "rb") as f:
-        img_b64 = base64.b64encode(f.read()).decode()
+        file_bytes = f.read()
 
-    r = requests.post(url, json={"image": img_b64})
+    files = {
+        "image": ("image.jpg", file_bytes, "image/jpeg")
+    }
+
+    r = requests.post(url, files=files)
 
     print("STATUS:", r.status_code)
     print("TEXT:", r.text[:500])
 
-    return r.json()
+    if r.status_code == 200:
+        return r.json()
 
+    return {
+        "error": "YOLO failed",
+        "status": r.status_code,
+        "response": r.text
+    }
 # =========================
 # UPLOADS
 # =========================
