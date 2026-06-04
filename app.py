@@ -23,15 +23,15 @@ def call_yolo(image_path):
     url = "https://warrdi.com/pytho/detect"
     try:
         with open(image_path, "rb") as f:
-            # Spécifier explicitement le type MIME de l'image
-            files = {
+            files   = {
                 "image": (
                     os.path.basename(image_path),
                     f,
                     "image/jpeg"
                 )
             }
-            r = requests.post(url, files=files, timeout=20)
+            headers = {"Accept": "application/json"}
+            r = requests.post(url, files=files, headers=headers, timeout=20)
 
         if r.status_code == 200:
             return r.json()
