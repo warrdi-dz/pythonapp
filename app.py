@@ -27,10 +27,7 @@ def call_yolo(image_path):
     url = "https://warrdi.com/pytho/detect"
 
     try:
-        with open(image_path, "rb") as f:
-            files = {"image": f}
-            r = requests.post(url, files=files, timeout=20)
-
+        with open(image_path, "rb") as f:r = requests.post(url,data=f.read(),headers={"Content-Type": "application/octet-stream"},timeout=20)
         # 🔴 DEBUG ICI (IMPORTANT)
         print("STATUS:", r.status_code)
         print("TEXT:", r.text[:500])
