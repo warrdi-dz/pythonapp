@@ -298,7 +298,7 @@ def analyse():
         mask_glass = cv2.inRange(hsv_full,(0, 0, 0),(180, 80, 120))
         mask_body = cv2.bitwise_and(mask_body,cv2.bitwise_not(mask_glass))
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(5, 5))
-        mask_body = cv2.morphologyEx(mask_body,cv2.MORPH_CLOSE,kernel,iterations=2))
+        mask_body = cv2.morphologyEx(mask_body,cv2.MORPH_CLOSE,kernel,iterations=2)
         
 
         # ===============================================
