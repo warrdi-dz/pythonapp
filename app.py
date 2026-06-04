@@ -284,22 +284,23 @@ def analyse():
         # MASQUE CARROSSERIE
         # ===============================================
         hsv_full  = cv2.cvtColor(car_crop, cv2.COLOR_BGR2HSV)
-        h, s, v = cv2.split(hsv_full)
-        # Pixels très sombres = ombres
-        mask_shadow = cv2.inRange(v, 0, 70)
-        # Pixels très lumineux = reflets
-        mask_reflect = cv2.inRange(v, 220, 255)
-        mask_body = cv2.bitwise_and(mask_body,cv2.bitwise_not(mask_shadow))
-        mask_body = cv2.bitwise_and(mask_body,cv2.bitwise_not(mask_reflect))
         mask_dark = cv2.inRange(hsv_full, (0, 0, 0),   (180, 255, 45))
         mask_sky  = cv2.inRange(hsv_full, (0, 0, 210), (180, 18, 255))
         mask_body = cv2.bitwise_not(cv2.bitwise_or(mask_dark, mask_sky))
-        kernel    = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-        mask_body = cv2.morphologyEx(mask_body, cv2.MORPH_CLOSE, kernel)
+        # Ombre 
+        h, s, v = cv2.split(hsv_full)
+        mask_shadow = cv2.inRange(v,0,70)
+        mask_body = cv2.bitwise_and(mask_body,cv2.bitwise_not(mask_shadow))
+        # Reflets
+        mask_reflect = cv2.inRange(v,220,255)
+        mask_body = cv2.bitwise_and(mask_body,cv2.bitwise_not(mask_reflect))
+        # Vitres
         mask_glass = cv2.inRange(hsv_full,(0, 0, 0),(180, 80, 120))
         mask_body = cv2.bitwise_and(mask_body,cv2.bitwise_not(mask_glass))
-        mask_reflect = cv2.inRange(hsv_full,(0, 0, 220),(180, 80, 255))
-        mask_body = cv2.bitwise_and(mask_body,cv2.bitwise_not(mask_reflect))
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(5, 5))
+        mask_body = cv2.morphologyEx(mask_body,cv2.MORPH_CLOSE,kernel,iterations=2))
+        
+
         # ===============================================
         # MOYENNE GLOBALE
         # ===============================================
