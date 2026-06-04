@@ -384,15 +384,13 @@ def analyse():
 
                 if diff >= 14 and diff < 26:
                     color_rect = (0, 0, 255)
-                    verdict    = "Attention peinture refaite!"
+                verdict = "Attention peinture refaite!"
                 elif diff < 14:
-                    color_rect = (0, 165, 255)
-                    verdict    = "Legere variation suspecte!"
-                    detected  += 1
+                     color_rect = (0, 165, 255)
+                verdict = "Legere variation suspecte!"
                 else:
-                    color_rect = (0, 210, 0)
-                    verdict    = "OK"
-                    detected  += 1
+                     color_rect = (0, 210, 0)
+                     verdict = "OK"
 
                 label_score = str(int(diff))
 
