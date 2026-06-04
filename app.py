@@ -27,13 +27,12 @@ def call_yolo(image_path):
     url = "https://warrdi.com/pytho/detect"
 
     try:
-        with open(image_path, "rb") as f:r = requests.post(url,data=f.read(),headers={"Content-Type": "application/octet-stream"},timeout=20)
-        # 🔴 DEBUG ICI (IMPORTANT)
+        with open(image_path, "rb") as f:
+            files = {"image": (os.path.basename(image_path), f, "image/jpeg")}
+            r = requests.post(url, files=files, timeout=20)
+
         print("STATUS:", r.status_code)
         print("TEXT:", r.text[:500])
-
-        print("HEADERS:", r.request.headers)
-        print("BODY:", r.request.body[:200] if r.request.body else None)
 
         if r.status_code == 200:
             return r.json()
