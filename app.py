@@ -25,8 +25,7 @@ def call_yolo(image_path):
     try:
         with open(image_path, "rb") as f:
             files = {"image": f}
-            r = requests.post(url, files=files, timeout=20)
-
+            r = requests.post(url,files={"image": ("image.jpg", f, "image/jpeg")},timeout=20)
         # 👇 ICI tu ajoutes les logs
         print("STATUS:", r.status_code)
         print("TEXT:", r.text[:500])
