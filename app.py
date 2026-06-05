@@ -33,7 +33,11 @@ def call_yolo(image_path):
 
         print("STATUS:", r.status_code)
         print("TEXT:", r.text[:500])
-
+        print("URL:", url)
+      
+        print("RESPONSE:", r.text[:500])
+        print("REQUEST HEADERS:", r.request.headers)
+        print("FINAL URL:", r.url)
         if r.status_code == 200:
             return r.json()
 
