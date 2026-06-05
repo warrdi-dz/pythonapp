@@ -145,7 +145,7 @@ def detect_brand_and_color(car_crop, hsv_full, mask_body):
 # =============================================
 def build_body_mask(car_crop, hsv):
     mask_dark = cv2.inRange(hsv, (0, 0,   0), (180, 255,  45))
-    mask_refl = cv2.inRange(hsv, (0, 0, 218), (180, 255, 255))
+    
     mask_sky  = cv2.inRange(hsv, (0, 0, 210), (180,  20, 255))
     mask_chro = cv2.inRange(hsv, (0, 0,   0), (180,  12, 255))
     mask_chro = np.zeros_like(mask_dark)
@@ -268,9 +268,9 @@ def detect_view(car_crop):
     if has_doors and ratio_wh > 1.4:
         log.append("→ SIDE FULL")
         if red_tot > 200:
-            if red_L > red_R * 1.4:
+            if red_L < red_R * 1.4:
                 return "side_full", "right", log
-            elif red_R > red_L * 1.4:
+            elif red_R < red_L * 1.4:
                 return "side_full", "left", log
         if white_tot > 150:
             if white_L > white_R * 1.4:
