@@ -148,8 +148,12 @@ def build_body_mask(car_crop, hsv):
     mask_refl = cv2.inRange(hsv, (0, 0, 218), (180, 255, 255))
     mask_sky  = cv2.inRange(hsv, (0, 0, 210), (180,  20, 255))
     mask_chro = cv2.inRange(hsv, (0, 0,   0), (180,  12, 255))
-
+    mask_chro = np.zeros_like(mask_dark)
     exclude   = cv2.bitwise_or(mask_dark, mask_refl)
+    print("DARK =", cv2.countNonZero(mask_dark))
+    print("REFL =", cv2.countNonZero(mask_refl))
+    print("SKY  =", cv2.countNonZero(mask_sky))
+    print("CHRO =", cv2.countNonZero(mask_chro))
     exclude   = cv2.bitwise_or(exclude,   mask_sky)
     exclude   = cv2.bitwise_or(exclude,   mask_chro)
     mask_body = cv2.bitwise_not(exclude)
