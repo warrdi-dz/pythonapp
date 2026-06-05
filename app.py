@@ -145,15 +145,11 @@ def detect_brand_and_color(car_crop, hsv_full, mask_body):
 # =============================================
 def build_body_mask(car_crop, hsv):
     mask_dark = cv2.inRange(hsv, (0, 0,   0), (180, 255,  45))
-    
+    mask_refl = cv2.inRange(hsv, (0, 0, 218), (180, 255, 255))
     mask_sky  = cv2.inRange(hsv, (0, 0, 210), (180,  20, 255))
-    mask_chro = cv2.inRange(hsv, (0, 0,   0), (180,  12, 255))
-    mask_chro = np.zeros_like(mask_dark)
+    mask_chro = cv2.inRange(hsv, (0, 0,   0), (180,  28, 255))
+
     exclude   = cv2.bitwise_or(mask_dark, mask_refl)
-    print("DARK =", cv2.countNonZero(mask_dark))
-    print("REFL =", cv2.countNonZero(mask_refl))
-    print("SKY  =", cv2.countNonZero(mask_sky))
-    print("CHRO =", cv2.countNonZero(mask_chro))
     exclude   = cv2.bitwise_or(exclude,   mask_sky)
     exclude   = cv2.bitwise_or(exclude,   mask_chro)
     mask_body = cv2.bitwise_not(exclude)
@@ -288,20 +284,10 @@ def detect_view(car_crop):
         return "rear_only", ("left" if red_L > red_R else "right"), log
 
     if red_tot > 100 and ratio_wh < 1.5:
+        log.append("→ REAR 3Q")
+        return "rear_3q", ("left" if red_L > red_R else "right"), log
 
-        if glass_tot > 5000:
-            log.append("→ SIDE FULL (3/4)")
-            return "side_full", ("left" if red_L > red_R else "right"), log
-
-    log.append("→ REAR 3Q")
-    return "rear_3q", ("left" if red_L > red_R else "right"), log
     log.append("→ FALLBACK side_full")
-    print(
-    "VIEW =",
-    view_type,
-    "orientation =",
-    orientation
-    )
     return "side_full", "left", log
 
 
@@ -317,56 +303,32 @@ def detect_view(car_crop):
 # - Vue arrière : aile ar G | coffre | pare-ch | aile ar D
 # =============================================
 def define_visible_zones(view_type, orientation,
-                         crop_h, crop_w, mask_body):
-
-    MIN_PIX = 150
-    y1b = int(crop_h * 0.15)
-    y2b = int(crop_h * 0.80)
+                          crop_h, crop_w, mask_body):
+    """
+    Crée les zones uniquement là où la carrosserie
+    est vraiment visible et analysable.
+    Seuil minimum : 300 pixels valides par zone.
+    """
+    MIN_PIX = 300
+    y1b     = int(crop_h * 0.08)
+    y2b     = int(crop_h * 0.90)
 
     def has_enough(xA, yA, xB, yB):
-
         zm = mask_body[yA:yB, xA:xB]
+        return cv2.countNonZero(zm) >= MIN_PIX
 
-        body_pixels = cv2.countNonZero(zm)
-        total_pixels = zm.shape[0] * zm.shape[1]
-
-        if total_pixels == 0:
-            return False
-
-        ratio = body_pixels / total_pixels
-
-        if body_pixels < MIN_PIX:
-            return False
-
-        if ratio < 0.10:
-            return False
-
-        print(
-            f"ZONE TEST {xA}-{xB} : "
-            f"pixels={body_pixels} "
-            f"ratio={ratio:.2f}"
-        )
-        if body_pixels < MIN_PIX:
-            return False
-
-        if ratio < 0.10:
-            return False
-        return True
-        
     zones = []
 
-    # suite de ton code...
     # --------------------------------------------------
     # VUE CÔTÉ COMPLÈTE : 4 pièces verticales
     # Aile avant | Porte avant | Porte arrière | Aile arr.
     # --------------------------------------------------
     if view_type == "side_full":
         cuts = [
-            int(crop_w * 0.15),
-            int(crop_w * 0.40),
-            int(crop_w * 0.80),
+            int(crop_w * 0.20),   # fin aile avant
+            int(crop_w * 0.45),   # fin porte avant
+            int(crop_w * 0.70),   # fin porte arrière
         ]
-        
         if orientation == "left":
             pieces = [
                 ("Aile avant",    0,       cuts[0]),
@@ -534,9 +496,7 @@ def analyse():
         cv2.imwrite(resized_path, img_yolo, [cv2.IMWRITE_JPEG_QUALITY, 92])
 
         yolo_result = call_yolo(resized_path)
-        print("================================")
-        print("YOLO RESULT =", yolo_result)
-        print("================================")
+
         detections = yolo_result.get("detections", [])
         cars = [d for d in detections if d.get("class") == 2]
         if not cars:
@@ -575,8 +535,6 @@ def analyse():
         lab_full  = cv2.cvtColor(car_crop, cv2.COLOR_BGR2LAB)
         gray_full = cv2.cvtColor(car_crop, cv2.COLOR_BGR2GRAY)
         mask_body = build_body_mask(car_crop, hsv_full)
-        print("BODY PIXELS =",cv2.countNonZero(mask_body),"/",crop_w * crop_h,"=",
-             round(cv2.countNonZero(mask_body) /(crop_w * crop_h) * 100,1),"%")
 
         # ===============================================
         # COULEUR ET MARQUE
