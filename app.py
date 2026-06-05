@@ -288,10 +288,20 @@ def detect_view(car_crop):
         return "rear_only", ("left" if red_L > red_R else "right"), log
 
     if red_tot > 100 and ratio_wh < 1.5:
-        log.append("→ REAR 3Q")
-        return "rear_3q", ("left" if red_L > red_R else "right"), log
 
+        if glass_tot > 5000:
+            log.append("→ SIDE FULL (3/4)")
+            return "side_full", ("left" if red_L > red_R else "right"), log
+
+    log.append("→ REAR 3Q")
+    return "rear_3q", ("left" if red_L > red_R else "right"), log
     log.append("→ FALLBACK side_full")
+    print(
+    "VIEW =",
+    view_type,
+    "orientation =",
+    orientation
+    )
     return "side_full", "left", log
 
 
