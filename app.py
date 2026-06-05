@@ -306,8 +306,8 @@ def analyse():
         # ===============================================
         # 3 ZONES — proportionnelles au vrai crop
         # ===============================================
-        band_y1 = int(crop_h * 0.15)
-        band_y2 = int(crop_h * 0.80)
+        band_y1 = int(crop_h * 0.10)
+        band_y2 = int(crop_h * 1.80)
         cut1    = int(crop_w * 0.33)
         cut2    = int(crop_w * 0.67)
 
