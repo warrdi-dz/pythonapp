@@ -310,24 +310,25 @@ def define_visible_zones(view_type, orientation,
     Seuil minimum : 300 pixels valides par zone.
     """
     MIN_PIX = 300
-    y1b     = int(crop_h * 0.08)
-    y2b     = int(crop_h * 0.90)
+    y1b     = int(crop_h * 0.20)
+    y2b     = int(crop_h * 0.70)
 
     def has_enough(xA, yA, xB, yB):
         zm = mask_body[yA:yB, xA:xB]
         return cv2.countNonZero(zm) >= MIN_PIX
 
     zones = []
-
+    col_pixels = np.sum(mask_body > 0, axis=0)
+    print(col_pixels.tolist())                         
     # --------------------------------------------------
     # VUE CÔTÉ COMPLÈTE : 4 pièces verticales
     # Aile avant | Porte avant | Porte arrière | Aile arr.
     # --------------------------------------------------
     if view_type == "side_full":
         cuts = [
-            int(crop_w * 0.20),   # fin aile avant
-            int(crop_w * 0.45),   # fin porte avant
-            int(crop_w * 0.70),   # fin porte arrière
+            int(crop_w * 0.12),   # fin aile avant
+            int(crop_w * 0.40),   # fin porte avant
+            int(crop_w * 0.68),   # fin porte arrière
         ]
         if orientation == "left":
             pieces = [
