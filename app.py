@@ -496,7 +496,9 @@ def analyse():
         cv2.imwrite(resized_path, img_yolo, [cv2.IMWRITE_JPEG_QUALITY, 92])
 
         yolo_result = call_yolo(resized_path)
-
+        print("================================")
+        print("YOLO RESULT =", yolo_result)
+        print("================================")
         detections = yolo_result.get("detections", [])
         cars = [d for d in detections if d.get("class") == 2]
         if not cars:
