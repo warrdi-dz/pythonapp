@@ -305,7 +305,7 @@ def detect_view(car_crop):
 def define_visible_zones(view_type, orientation,
                          crop_h, crop_w, mask_body):
 
-    MIN_PIX = 300
+    MIN_PIX = 150
     y1b = int(crop_h * 0.15)
     y2b = int(crop_h * 0.80)
 
@@ -324,7 +324,7 @@ def define_visible_zones(view_type, orientation,
         if body_pixels < MIN_PIX:
             return False
 
-        if ratio < 0.30:
+        if ratio < 0.10:
             return False
 
         print(
@@ -335,7 +335,7 @@ def define_visible_zones(view_type, orientation,
         if body_pixels < MIN_PIX:
             return False
 
-        if ratio < 0.30:
+        if ratio < 0.10:
             return False
         return True
         
