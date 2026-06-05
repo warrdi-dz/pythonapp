@@ -27,24 +27,23 @@ def call_yolo(image_path):
     url = "https://warrdi.com/pytho/detect"
 
     try:
-        print("URL:", url)
+        print("TEST URL =", url)
 
-        r = requests.get(url, timeout=20)
+        r = requests.get(
+            url,
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=20
+        )
 
-        print("GET STATUS:", r.status_code)
-        print("GET TEXT:", r.text[:500])
+        print("STATUS =", r.status_code)
+        print("FINAL URL =", r.url)
+        print("TEXT =", r.text[:500])
 
-        return {
-            "test": True,
-            "status": r.status_code,
-            "response": r.text
-        }
-
-    except Exception as e:
-        return {"error": str(e)}
+        return {}
 
     except Exception as e:
-        return {"error": "YOLO exception", "details": str(e)}
+        print("ERROR =", e)
+        return {}
 # =========================
 # UPLOADS
 # =========================
