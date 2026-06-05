@@ -39,7 +39,7 @@ def call_yolo(image_path):
 
     print("STATUS =", r.status_code)
     print("TEXT =", r.text)
-    print("DETECTIONS =", len(detections))
+ 
     return r.json()
 # =========================
 # UPLOADS
@@ -350,8 +350,13 @@ def analyse():
         cv2.imwrite(resized_path, img_yolo, [cv2.IMWRITE_JPEG_QUALITY, 92])
 
         yolo_result = call_yolo(resized_path)
+
         print("YOLO RESULT =", yolo_result)
+        print("YOLO TYPE =", type(yolo_result))
+
         detections = yolo_result.get("detections", [])
+        print("DETECTIONS =", detections)
+
         cars = [d for d in detections if d.get("class") == 2]
         if not cars:
             return jsonify({"error": "Car not detected"}), 400
