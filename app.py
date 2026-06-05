@@ -39,7 +39,7 @@ def call_yolo(image_path):
 
     print("STATUS =", r.status_code)
     print("TEXT =", r.text)
-
+    print("DETECTIONS =", len(detections))
     return r.json()
 # =========================
 # UPLOADS
