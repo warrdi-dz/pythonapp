@@ -310,12 +310,33 @@ def define_visible_zones(view_type, orientation,
     Seuil minimum : 300 pixels valides par zone.
     """
     MIN_PIX = 300
-    y1b     = int(crop_h * 0.08)
-    y2b     = int(crop_h * 0.90)
+    y1b = int(crop_h * 0.15)
+    y2b = int(crop_h * 0.80)
 
-    def has_enough(xA, yA, xB, yB):
-        zm = mask_body[yA:yB, xA:xB]
-        return cv2.countNonZero(zm) >= MIN_PIX
+def has_enough(xA, yA, xB, yB):
+    zm = mask_body[yA:yB, xA:xB]
+
+    body_pixels = cv2.countNonZero(zm)
+    total_pixels = zm.shape[0] * zm.shape[1]
+
+    if total_pixels == 0:
+        return False
+
+    ratio = body_pixels / total_pixels
+
+    # minimum de pixels
+    if body_pixels < MIN_PIX:
+        return False
+
+    # la carrosserie doit occuper au moins 30% de la zone
+    if ratio < 0.30:
+        return False
+    print(
+    f"ZONE TEST {xA}-{xB} : "
+    f"pixels={body_pixels} "
+    f"ratio={ratio:.2f}"
+    )
+    return True
 
     zones = []
 
@@ -325,10 +346,11 @@ def define_visible_zones(view_type, orientation,
     # --------------------------------------------------
     if view_type == "side_full":
         cuts = [
-            int(crop_w * 0.20),   # fin aile avant
-            int(crop_w * 0.45),   # fin porte avant
-            int(crop_w * 0.70),   # fin porte arrière
+            int(crop_w * 0.15),
+            int(crop_w * 0.40),
+            int(crop_w * 0.80),
         ]
+        
         if orientation == "left":
             pieces = [
                 ("Aile avant",    0,       cuts[0]),
