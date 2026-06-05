@@ -26,24 +26,21 @@ import requests
 def call_yolo(image_path):
     url = "https://warrdi.com/pytho/detect"
 
-    try:
-        print("TEST URL =", url)
+    with open(image_path, "rb") as f:
+        files = {
+            "image": ("image.jpg", f, "image/jpeg")
+        }
 
-        r = requests.get(
+        r = requests.post(
             url,
-            headers={"User-Agent": "Mozilla/5.0"},
+            files=files,
             timeout=20
         )
 
-        print("STATUS =", r.status_code)
-        print("FINAL URL =", r.url)
-        print("TEXT =", r.text[:500])
+    print("STATUS =", r.status_code)
+    print("TEXT =", r.text)
 
-        return {}
-
-    except Exception as e:
-        print("ERROR =", e)
-        return {}
+    return r.json()
 # =========================
 # UPLOADS
 # =========================
