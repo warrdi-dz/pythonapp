@@ -303,43 +303,45 @@ def detect_view(car_crop):
 # - Vue arrière : aile ar G | coffre | pare-ch | aile ar D
 # =============================================
 def define_visible_zones(view_type, orientation,
-                          crop_h, crop_w, mask_body):
-    """
-    Crée les zones uniquement là où la carrosserie
-    est vraiment visible et analysable.
-    Seuil minimum : 300 pixels valides par zone.
-    """
+                         crop_h, crop_w, mask_body):
+
     MIN_PIX = 300
     y1b = int(crop_h * 0.15)
     y2b = int(crop_h * 0.80)
 
-def has_enough(xA, yA, xB, yB):
-    zm = mask_body[yA:yB, xA:xB]
+    def has_enough(xA, yA, xB, yB):
 
-    body_pixels = cv2.countNonZero(zm)
-    total_pixels = zm.shape[0] * zm.shape[1]
+        zm = mask_body[yA:yB, xA:xB]
 
-    if total_pixels == 0:
-        return False
+        body_pixels = cv2.countNonZero(zm)
+        total_pixels = zm.shape[0] * zm.shape[1]
 
-    ratio = body_pixels / total_pixels
+        if total_pixels == 0:
+            return False
 
-    # minimum de pixels
-    if body_pixels < MIN_PIX:
-        return False
+        ratio = body_pixels / total_pixels
 
-    # la carrosserie doit occuper au moins 30% de la zone
-    if ratio < 0.30:
-        return False
-    print(
-    f"ZONE TEST {xA}-{xB} : "
-    f"pixels={body_pixels} "
-    f"ratio={ratio:.2f}"
-    )
-    return True
+        if body_pixels < MIN_PIX:
+            return False
 
+        if ratio < 0.30:
+            return False
+
+        print(
+            f"ZONE TEST {xA}-{xB} : "
+            f"pixels={body_pixels} "
+            f"ratio={ratio:.2f}"
+        )
+        if body_pixels < MIN_PIX:
+            return False
+
+        if ratio < 0.30:
+            return False
+        return True
+        
     zones = []
 
+    # suite de ton code...
     # --------------------------------------------------
     # VUE CÔTÉ COMPLÈTE : 4 pièces verticales
     # Aile avant | Porte avant | Porte arrière | Aile arr.
