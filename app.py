@@ -268,9 +268,9 @@ def detect_view(car_crop):
     if has_doors and ratio_wh > 1.4:
         log.append("→ SIDE FULL")
         if red_tot > 200:
-            if red_L < red_R * 1.4:
+            if red_L > red_R * 1.4:
                 return "side_full", "right", log
-            elif red_R < red_L * 1.4:
+            elif red_R > red_L * 1.4:
                 return "side_full", "left", log
         if white_tot > 150:
             if white_L > white_R * 1.4:
