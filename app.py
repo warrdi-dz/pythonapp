@@ -147,7 +147,7 @@ def build_body_mask(car_crop, hsv):
     mask_dark = cv2.inRange(hsv, (0, 0,   0), (180, 255,  45))
     mask_refl = cv2.inRange(hsv, (0, 0, 218), (180, 255, 255))
     mask_sky  = cv2.inRange(hsv, (0, 0, 210), (180,  20, 255))
-    mask_chro = cv2.inRange(hsv, (0, 0,   0), (180,  28, 255))
+    mask_chro = cv2.inRange(hsv, (0, 0,   0), (180,  12, 255))
 
     exclude   = cv2.bitwise_or(mask_dark, mask_refl)
     exclude   = cv2.bitwise_or(exclude,   mask_sky)
@@ -561,6 +561,8 @@ def analyse():
         lab_full  = cv2.cvtColor(car_crop, cv2.COLOR_BGR2LAB)
         gray_full = cv2.cvtColor(car_crop, cv2.COLOR_BGR2GRAY)
         mask_body = build_body_mask(car_crop, hsv_full)
+        print("BODY PIXELS =",cv2.countNonZero(mask_body),"/",crop_w * crop_h,"=",
+             round(cv2.countNonZero(mask_body) /(crop_w * crop_h) * 100,1),"%")
 
         # ===============================================
         # COULEUR ET MARQUE
