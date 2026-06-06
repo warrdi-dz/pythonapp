@@ -345,7 +345,7 @@ def build_zones(crop_w, crop_h, angle, rear_side, front_side, facing, lights):
         return pack(zones, f"30-70 3/4 marque {orient} near={near_side}")
 
     # =============== 70-110  FACE/ARRIERE PUR ===============
-    if angle <= 110:
+    if angle <= 149:
         zones = [
             (f"Pare-choc {orient}", 0.00, 0.55),
             (panel,                 0.45, 1.00),
