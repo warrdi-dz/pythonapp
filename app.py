@@ -281,7 +281,7 @@ def build_zones(crop_w, crop_h, angle, rear_side, front_side, facing, lights):
 
     top_base = 0.22
     bot_base = 0.85
-    orient = "AR" if is_rear else "AV"
+    orient = "AV" if is_rear else "AR"
     panel  = "Malle" if is_rear else "Capot"
 
     def pack(zones, label):
