@@ -233,157 +233,163 @@ def make_poly(crop_w, crop_h, xA, xB, top_base, bot_base, perspective, tilt_dir)
 # Les zones sont retournees sous forme de polygones 3D (trapezes)
 # =========================
 def build_zones(crop_w, crop_h, angle, rear_side, front_side, facing, lights):
-    # tilt_dir: si rear_side == right, le cote droit s'eloigne donc s'enfonce -> +1
-    # mais en pratique pour 3/4 arriere, l'arriere est PROCHE de la camera (gros) et l'avant fuit
-    # donc le cote AVANT s'enfonce. tilt_dir va vers le cote AVANT.
-    tilt_dir = +1 if front_side == "right" else -1
+    """
+    Logique unifiee 0-180 deg, basee sur la MOITIE DU CORPS de la voiture.
 
-    # perspective amplitude en fonction de l'angle
-    # angle 0 = profil pur -> pas de perspective verticale (rectangles)
-    # angle 30-60 = 3/4 marque -> perspective forte
-    # angle >80 = face/arriere -> rectangles aussi
-    if angle <= 5 or angle >= 85:
+    PRIORITE 1 : orientation decidee par les feux
+       - grand feu rouge  -> on voit l'ARRIERE (facing = rear)
+       - grand feu blanc  -> on voit l'AVANT  (facing = front)
+       Le cote (gauche/droite) du feu dominant donne le cote PROCHE camera.
+
+    PRIORITE 2 : l'angle decide quels segments sont visibles
+       0-10   : profil pur    -> 4 zones laterales (ailes + portes)
+       10-30  : 3/4 leger     -> 4 zones cote dominant (parchoq + aile + malle/capot + porte)
+       30-70  : 3/4 marque    -> parchoq + malle/capot + aile
+       70-110 : face/arriere  -> parchoq + malle/capot uniquement
+       110-150: 3/4 inverse   -> parchoq + aile + porte AR + porte AV (cote dominant)
+       150-180: profil inverse-> 4 zones laterales
+
+    rear_side / front_side indiquent ou est l'AR / AV dans l'image (left/right).
+    """
+    is_rear = (facing == "rear") or (
+        facing == "side" and
+        (lights["red_left"] + lights["red_right"]) >=
+        (lights["white_left"] + lights["white_right"])
+    )
+    # cote PROCHE camera = cote du feu dominant
+    near_side = rear_side if is_rear else front_side
+    if near_side is None:
+        near_side = "right"
+
+    # tilt_dir : le cote OPPOSE au feu dominant s'enfonce dans la perspective
+    tilt_dir = +1 if near_side == "left" else -1
+
+    if angle <= 5 or (85 <= angle <= 95):
         persp = 0.0
     elif angle <= 30:
         persp = 0.5 * (angle / 30.0)
     elif angle <= 60:
-        persp = 0.5 + 0.4 * ((angle - 30) / 30.0)   # 0.5 -> 0.9
-    else:
+        persp = 0.5 + 0.4 * ((angle - 30) / 30.0)
+    elif angle <= 85:
         persp = max(0.0, 0.9 - (angle - 60) * 0.03)
+    elif angle <= 120:
+        persp = 0.5 * ((angle - 95) / 25.0) if angle > 95 else 0.0
+    elif angle <= 150:
+        persp = 0.5 + 0.4 * ((angle - 120) / 30.0)
+    else:
+        persp = max(0.0, 0.9 - (angle - 150) * 0.03)
 
     top_base = 0.22
     bot_base = 0.85
+    orient = "AR" if is_rear else "AV"
+    panel  = "Malle" if is_rear else "Capot"
 
-    # -------- VUE ARRIERE PURE (facing rear et angle haut) --------
-    if facing == "rear" and angle >= 75:
-        # 1 seule zone : pare-choc AR (toute la largeur)
-        return [{
-            "name": "Pare-choc AR",
-            "poly": make_poly(crop_w, crop_h, 0, crop_w, top_base, bot_base, 0.0, tilt_dir)
-        }], f"angle>=75 facing=rear -> Pare-choc AR seul"
+    def pack(zones, label):
+        out = [{
+            "name": n,
+            "poly": make_poly(crop_w, crop_h, int(a*crop_w), int(b*crop_w),
+                              top_base, bot_base, persp, tilt_dir)
+        } for (n, a, b) in zones]
+        return out, label
 
-    # -------- VUE AVANT PURE --------
-    if facing == "front" and angle >= 75:
-        return [{
-            "name": "Pare-choc AV",
-            "poly": make_poly(crop_w, crop_h, 0, crop_w, top_base, bot_base, 0.0, tilt_dir)
-        }], f"angle>=75 facing=front -> Pare-choc AV seul"
-
-    # -------- PROFIL PUR (angle ~0) --------
+    # =============== 0-10  PROFIL PUR ===============
     if angle <= 10:
-        # 4 zones laterales : 2 grandes (portes) + 2 petites (ailes)
-        # Cote rear_side = aile AR + porte AR (vers feu rouge)
-        # Cote front_side = porte AV + aile AV (vers feu blanc)
-        if rear_side == "right":
+        if near_side == "right":
             zones = [
-                ("Aile AV",  0.00, 0.18),
-                ("Porte AV", 0.18, 0.50),
-                ("Porte AR", 0.50, 0.82),
-                ("Aile AR",  0.82, 1.00),
+                (f"Aile {'AV' if is_rear else 'AR'}",  0.00, 0.18),
+                (f"Porte {'AV' if is_rear else 'AR'}",0.18, 0.50),
+                (f"Porte {orient}", 0.50, 0.82),
+                (f"Aile {orient}",  0.82, 1.00),
             ]
         else:
             zones = [
-                ("Aile AR",  0.00, 0.18),
-                ("Porte AR", 0.18, 0.50),
-                ("Porte AV", 0.50, 0.82),
-                ("Aile AV",  0.82, 1.00),
+                (f"Aile {orient}",  0.00, 0.18),
+                (f"Porte {orient}", 0.18, 0.50),
+                (f"Porte {'AV' if is_rear else 'AR'}",0.50, 0.82),
+                (f"Aile {'AV' if is_rear else 'AR'}",  0.82, 1.00),
             ]
-        out = [{
-            "name": n,
-            "poly": make_poly(crop_w, crop_h, int(a*crop_w), int(b*crop_w),
-                              top_base, bot_base, persp, tilt_dir)
-        } for (n, a, b) in zones]
-        return out, "angle<=10 profil pur -> 4 zones laterales"
+        return pack(zones, f"0-10 profil pur, near={near_side}, facing={orient}")
 
-    # -------- 3/4 LEGER 10-30 : cote dominant selon feu --------
+    # =============== 10-30  3/4 LEGER ===============
     if angle <= 30:
-        if facing == "rear" or (lights["red_left"] + lights["red_right"]) > (lights["white_left"] + lights["white_right"]):
-            # cote arriere visible: Pare-choc AR + Aile AR + Malle + Porte AR
-            if rear_side == "right":
-                zones = [
-                    ("Porte AR", 0.30, 0.55),
-                    ("Malle",    0.55, 0.72),
-                    ("Aile AR",  0.72, 0.88),
-                    ("Pare-choc AR", 0.88, 1.00),
-                ]
-            else:
-                zones = [
-                    ("Pare-choc AR", 0.00, 0.12),
-                    ("Aile AR",  0.12, 0.28),
-                    ("Malle",    0.28, 0.45),
-                    ("Porte AR", 0.45, 0.70),
-                ]
-            label = "angle 10-30 -> cote AR visible"
+        if near_side == "right":
+            zones = [
+                (f"Porte {orient}", 0.30, 0.55),
+                (panel,             0.55, 0.72),
+                (f"Aile {orient}",  0.72, 0.88),
+                (f"Pare-choc {orient}", 0.88, 1.00),
+            ]
         else:
-            # cote avant visible
-            if front_side == "right":
-                zones = [
-                    ("Porte AV", 0.30, 0.55),
-                    ("Capot",    0.55, 0.72),
-                    ("Aile AV",  0.72, 0.88),
-                    ("Pare-choc AV", 0.88, 1.00),
-                ]
-            else:
-                zones = [
-                    ("Pare-choc AV", 0.00, 0.12),
-                    ("Aile AV",  0.12, 0.28),
-                    ("Capot",    0.28, 0.45),
-                    ("Porte AV", 0.45, 0.70),
-                ]
-            label = "angle 10-30 -> cote AV visible"
+            zones = [
+                (f"Pare-choc {orient}", 0.00, 0.12),
+                (f"Aile {orient}",      0.12, 0.28),
+                (panel,                 0.28, 0.45),
+                (f"Porte {orient}",     0.45, 0.70),
+            ]
+        return pack(zones, f"10-30 3/4 leger {orient} near={near_side}")
 
-        out = [{
-            "name": n,
-            "poly": make_poly(crop_w, crop_h, int(a*crop_w), int(b*crop_w),
-                              top_base, bot_base, persp, tilt_dir)
-        } for (n, a, b) in zones]
-        return out, label
-
-    # -------- 3/4 MARQUE 30-70 --------
+    # =============== 30-70  3/4 MARQUE ===============
     if angle <= 70:
-        if facing != "front":
-            # 3/4 AR marque : Pare-choc AR + Malle + Aile AR
-            if rear_side == "right":
-                zones = [
-                    ("Aile AR",      0.55, 0.78),
-                    ("Malle",        0.78, 0.92),
-                    ("Pare-choc AR", 0.92, 1.00),
-                ]
-            else:
-                zones = [
-                    ("Pare-choc AR", 0.00, 0.08),
-                    ("Malle",        0.08, 0.22),
-                    ("Aile AR",      0.22, 0.45),
-                ]
-            label = "angle 30-70 -> 3/4 AR (parchoq+malle+aile)"
+        if near_side == "right":
+            zones = [
+                (f"Aile {orient}",      0.55, 0.78),
+                (panel,                 0.78, 0.92),
+                (f"Pare-choc {orient}", 0.92, 1.00),
+            ]
         else:
-            if front_side == "right":
-                zones = [
-                    ("Aile AV",      0.55, 0.78),
-                    ("Capot",        0.78, 0.92),
-                    ("Pare-choc AV", 0.92, 1.00),
-                ]
-            else:
-                zones = [
-                    ("Pare-choc AV", 0.00, 0.08),
-                    ("Capot",        0.08, 0.22),
-                    ("Aile AV",      0.22, 0.45),
-                ]
-            label = "angle 30-70 -> 3/4 AV (parchoq+capot+aile)"
+            zones = [
+                (f"Pare-choc {orient}", 0.00, 0.08),
+                (panel,                 0.08, 0.22),
+                (f"Aile {orient}",      0.22, 0.45),
+            ]
+        return pack(zones, f"30-70 3/4 marque {orient} near={near_side}")
 
-        out = [{
-            "name": n,
-            "poly": make_poly(crop_w, crop_h, int(a*crop_w), int(b*crop_w),
-                              top_base, bot_base, persp, tilt_dir)
-        } for (n, a, b) in zones]
-        return out, label
+    # =============== 70-110  FACE/ARRIERE PUR ===============
+    if angle <= 110:
+        zones = [
+            (f"Pare-choc {orient}", 0.00, 0.55),
+            (panel,                 0.45, 1.00),
+        ]
+        return pack(zones, f"70-110 {orient} pur -> Pare-choc + {panel}")
 
-    # -------- 70-85 quasi face/arriere --------
-    name = "Pare-choc AR" if facing != "front" else "Pare-choc AV"
-    return [{
-        "name": name,
-        "poly": make_poly(crop_w, crop_h, 0, crop_w, top_base, bot_base, 0.0, tilt_dir)
-    }], f"angle 70-85 -> {name} seul"
+    # =============== 110-150  3/4 INVERSE ===============
+    # On voit 3/4 mais de l'autre cote : 4 zones cote dominant
+    # parchoq + aile {orient} + porte {orient} + porte {opposite}
+    if angle <= 150:
+        opp = "AV" if is_rear else "AR"
+        if near_side == "right":
+            zones = [
+                (f"Porte {opp}",        0.20, 0.45),
+                (f"Porte {orient}",     0.45, 0.65),
+                (f"Aile {orient}",      0.65, 0.85),
+                (f"Pare-choc {orient}", 0.85, 1.00),
+            ]
+        else:
+            zones = [
+                (f"Pare-choc {orient}", 0.00, 0.15),
+                (f"Aile {orient}",      0.15, 0.35),
+                (f"Porte {orient}",     0.35, 0.55),
+                (f"Porte {opp}",        0.55, 0.80),
+            ]
+        return pack(zones, f"110-150 3/4 inverse {orient} near={near_side}")
+
+    # =============== 150-180  PROFIL INVERSE ===============
+    opp = "AV" if is_rear else "AR"
+    if near_side == "right":
+        zones = [
+            (f"Aile {opp}",   0.00, 0.18),
+            (f"Porte {opp}",  0.18, 0.50),
+            (f"Porte {orient}",0.50, 0.82),
+            (f"Aile {orient}",0.82, 1.00),
+        ]
+    else:
+        zones = [
+            (f"Aile {orient}", 0.00, 0.18),
+            (f"Porte {orient}",0.18, 0.50),
+            (f"Porte {opp}",   0.50, 0.82),
+            (f"Aile {opp}",    0.82, 1.00),
+        ]
+    return pack(zones, f"150-180 profil inverse near={near_side}")
 
 
 # =========================
