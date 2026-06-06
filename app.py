@@ -203,7 +203,7 @@ def build_zones(crop_w, crop_h, angle, orientation, lights):
         ], f"angle>=80 -> 1 zone ({name})"
 
     # ---- 60 - 80 : 3/4 fortement arriere ----
-    if angle >= 60:
+    if angle >= 30:
         # 3 zones cote arriere : pare-choc AR, aile AR, porte AR
         # on place pare-choc du cote oppose a l'avant
         if orientation == "left":
