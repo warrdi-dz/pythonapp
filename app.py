@@ -171,148 +171,75 @@ def detect_car_orientation(car_crop, lights=None):
 # =========================
 # DECIDE ZONES par ANGLE
 #
-# NOUVELLE LOGIQUE (angle = ecart par rapport au profil pur)
-#
-# 0 - 10   : profil pur (peu precis). 4 zones laterales :
-#            - 2 GRANDES proportionnelles aux portes (AV + AR)
-#            - 2 PETITES proportionnelles aux ailes (AV + AR)
-#            Pare-chocs, malle et capot NON visibles.
-#            Cote AR = cote du feu rouge ; cote AV = cote du feu blanc.
-#
-# 10 - 30  : 3/4 leger. On choisit le cote le plus visible :
-#            - si feu ROUGE AR plus gros d'un cote -> on scanne ce cote AR :
-#              pare-choc AR + aile AR + malle + porte AR
-#            - sinon (feu BLANC AV plus gros) -> on scanne ce cote AV :
-#              pare-choc AV + capot + aile AV + porte AV
-#
-# 30 - 70  : 3/4 marque. On scanne pare-choc AR + malle.
-#            Si feu rouge AR present d'un cote -> on ajoute aile AR de ce cote.
-#
-# 70 - 180 : vue quasi pure AR. On scanne SEULEMENT pare-choc AR + malle.
-#            Pas d'aile, pas d'orientation gauche/droite.
+# angle 0-60   : 3/4 arriere -> 4 zones : pare-choc AR, porte AR, porte AV, aile AR
+#                (cote "avant" de l'image = arriere de la voiture)
+# angle 60-80  : presque profil arriere -> 3 zones : pare-choc AR, aile AR, porte AR
+# angle 80-90+ : pile arriere ou pile avant -> 1 zone : pare-choc (AR ou AV)
+#                sauf si les DEUX feux (rouge+blanc) visibles -> 4 zones (2 portes + 2 ailes)
 # =========================
 def build_zones(crop_w, crop_h, angle, orientation, lights):
     band_y1 = int(crop_h * 0.15)
     band_y2 = int(crop_h * 0.80)
-    malle_y1 = int(crop_h * 0.05)
-    malle_y2 = int(crop_h * 0.35)
 
-    rl = lights.get("red_left", 0)
-    rr = lights.get("red_right", 0)
-    wl = lights.get("white_left", 0)
-    wr = lights.get("white_right", 0)
-    red_total   = rl + rr
-    white_total = wl + wr
-    rear_visible  = red_total   > 150
-    front_visible = white_total > 100
+    rear_visible  = (lights["red_left"]   + lights["red_right"])   > 150
+    front_visible = (lights["white_left"] + lights["white_right"]) > 100
 
-    # cote du feu rouge (arriere) / feu blanc (avant)
-    rear_side  = "right" if rr >= rl else "left"   # cote ou se trouve l'AR
-    front_side = "right" if wr >= wl else "left"   # cote ou se trouve l'AV
+    # ---- 80 - 90+ : vue frontale ou arriere pure ----
+    if angle >= 80:
+        if rear_visible and front_visible:
+            # cas special : on voit les 2 -> 4 zones (2 portes + 2 ailes)
+            q = crop_w // 4
+            return [
+                {"name": "Aile G",  "xA": 0,     "xB": q,       "yA": band_y1, "yB": band_y2},
+                {"name": "Porte G", "xA": q,     "xB": 2*q,     "yA": band_y1, "yB": band_y2},
+                {"name": "Porte D", "xA": 2*q,   "xB": 3*q,     "yA": band_y1, "yB": band_y2},
+                {"name": "Aile D",  "xA": 3*q,   "xB": crop_w,  "yA": band_y1, "yB": band_y2},
+            ], "angle>=80, 2 feux visibles -> 4 zones laterales"
 
-    # ============= 70 - 180 : vue quasi arriere pure =============
-    if angle >= 70:
+        # sinon : pare-choc seulement
+        name = "Pare-choc AR" if rear_visible else "Pare-choc AV"
         return [
-            {"name": "Malle",        "xA": 0, "xB": crop_w, "yA": malle_y1, "yB": malle_y2},
-            {"name": "Pare-choc AR", "xA": 0, "xB": crop_w, "yA": int(crop_h*0.45), "yB": int(crop_h*0.90)},
-        ], f"angle {angle:.0f} (>=70) -> pare-choc AR + malle (pas d'aile, pas d'orientation)"
+            {"name": name, "xA": 0, "xB": crop_w, "yA": band_y1, "yB": band_y2},
+        ], f"angle>=80 -> 1 zone ({name})"
 
-    # ============= 30 - 70 : 3/4 marque arriere =============
+    # ---- 60 - 80 : 3/4 fortement arriere ----
     if angle >= 30:
-        zones = [
-            {"name": "Malle",        "xA": 0, "xB": crop_w, "yA": malle_y1, "yB": malle_y2},
-            {"name": "Pare-choc AR", "xA": 0, "xB": crop_w, "yA": int(crop_h*0.45), "yB": int(crop_h*0.90)},
-        ]
-        log = f"angle {angle:.0f} (30-70) -> pare-choc AR + malle"
-        if rear_visible:
-            if rear_side == "right":
-                zones.append({"name": "Aile AR D", "xA": int(crop_w*0.70), "xB": crop_w,
-                              "yA": band_y1, "yB": band_y2})
-                log += " + aile AR droite (feu rouge droit)"
-            else:
-                zones.append({"name": "Aile AR G", "xA": 0, "xB": int(crop_w*0.30),
-                              "yA": band_y1, "yB": band_y2})
-                log += " + aile AR gauche (feu rouge gauche)"
-        return zones, log
-
-    # ============= 10 - 30 : 3/4 leger, cote le plus visible =============
-    if angle >= 10:
-        # priorite au feu le plus gros (rouge => AR, blanc => AV)
-        use_rear = red_total >= white_total and rear_visible
-        if use_rear:
-            side = rear_side
-            if side == "right":
-                zones = [
-                    {"name": "Porte AR",     "xA": 0,                 "xB": int(crop_w*0.30), "yA": band_y1, "yB": band_y2},
-                    {"name": "Malle",        "xA": int(crop_w*0.20),  "xB": int(crop_w*0.80), "yA": malle_y1, "yB": malle_y2},
-                    {"name": "Aile AR",      "xA": int(crop_w*0.30),  "xB": int(crop_w*0.65), "yA": band_y1, "yB": band_y2},
-                    {"name": "Pare-choc AR", "xA": int(crop_w*0.65),  "xB": crop_w,           "yA": int(crop_h*0.45), "yB": int(crop_h*0.90)},
-                ]
-            else:
-                zones = [
-                    {"name": "Pare-choc AR", "xA": 0,                 "xB": int(crop_w*0.35), "yA": int(crop_h*0.45), "yB": int(crop_h*0.90)},
-                    {"name": "Aile AR",      "xA": int(crop_w*0.35),  "xB": int(crop_w*0.70), "yA": band_y1, "yB": band_y2},
-                    {"name": "Malle",        "xA": int(crop_w*0.20),  "xB": int(crop_w*0.80), "yA": malle_y1, "yB": malle_y2},
-                    {"name": "Porte AR",     "xA": int(crop_w*0.70),  "xB": crop_w,           "yA": band_y1, "yB": band_y2},
-                ]
-            return zones, f"angle {angle:.0f} (10-30) AR cote {side} -> pare-choc AR + aile AR + malle + porte AR"
+        # 3 zones cote arriere : pare-choc AR, aile AR, porte AR
+        # on place pare-choc du cote oppose a l'avant
+        if orientation == "left":
+            # avant a gauche => arriere a droite
+            return [
+                {"name": "Porte AR",     "xA": 0,             "xB": int(crop_w*0.40), "yA": band_y1, "yB": band_y2},
+                {"name": "Aile AR",      "xA": int(crop_w*0.40), "xB": int(crop_w*0.75), "yA": band_y1, "yB": band_y2},
+                {"name": "Pare-choc AR", "xA": int(crop_w*0.75), "xB": crop_w,         "yA": band_y1, "yB": band_y2},
+            ], "angle 60-80, avant gauche -> 3 zones AR a droite"
         else:
-            side = front_side
-            if side == "right":
-                zones = [
-                    {"name": "Porte AV",     "xA": 0,                 "xB": int(crop_w*0.30), "yA": band_y1, "yB": band_y2},
-                    {"name": "Capot",        "xA": int(crop_w*0.20),  "xB": int(crop_w*0.80), "yA": malle_y1, "yB": malle_y2},
-                    {"name": "Aile AV",      "xA": int(crop_w*0.30),  "xB": int(crop_w*0.65), "yA": band_y1, "yB": band_y2},
-                    {"name": "Pare-choc AV", "xA": int(crop_w*0.65),  "xB": crop_w,           "yA": int(crop_h*0.45), "yB": int(crop_h*0.90)},
-                ]
-            else:
-                zones = [
-                    {"name": "Pare-choc AV", "xA": 0,                 "xB": int(crop_w*0.35), "yA": int(crop_h*0.45), "yB": int(crop_h*0.90)},
-                    {"name": "Aile AV",      "xA": int(crop_w*0.35),  "xB": int(crop_w*0.70), "yA": band_y1, "yB": band_y2},
-                    {"name": "Capot",        "xA": int(crop_w*0.20),  "xB": int(crop_w*0.80), "yA": malle_y1, "yB": malle_y2},
-                    {"name": "Porte AV",     "xA": int(crop_w*0.70),  "xB": crop_w,           "yA": band_y1, "yB": band_y2},
-                ]
-            return zones, f"angle {angle:.0f} (10-30) AV cote {side} -> pare-choc AV + capot + aile AV + porte AV"
+            return [
+                {"name": "Pare-choc AR", "xA": 0,             "xB": int(crop_w*0.25), "yA": band_y1, "yB": band_y2},
+                {"name": "Aile AR",      "xA": int(crop_w*0.25), "xB": int(crop_w*0.60), "yA": band_y1, "yB": band_y2},
+                {"name": "Porte AR",     "xA": int(crop_w*0.60), "xB": crop_w,         "yA": band_y1, "yB": band_y2},
+            ], "angle 60-80, avant droit -> 3 zones AR a gauche"
 
-    # ============= 0 - 10 : profil pur, 4 zones laterales =============
-    # cote AR (feu rouge) -> 1 grande porte AR + 1 petite aile AR
-    # cote AV (feu blanc) -> 1 grande porte AV + 1 petite aile AV
-    # Si on n'a pas d'info de feux, on suppose AR a droite par defaut.
-    if rear_visible or front_visible:
-        rear_on_right = (rr >= rl) if rear_visible else (wr < wl)
+    # ---- 0 - 60 : 3/4 leger -> 4 zones (cote large complet) ----
+    # Le cote ou se trouve l'arriere (feu rouge gros) est le cote "large"
+    # -> on scanne : pare-choc AR + aile AR + porte AR + porte AV
+    # L'aile AVANT du cote oppose est petite (non scannable) donc ignoree
+    if orientation == "left":
+        # avant a gauche, arriere a droite (gros cote = droite)
+        return [
+            {"name": "Porte AV",     "xA": 0,                 "xB": int(crop_w*0.28), "yA": band_y1, "yB": band_y2},
+            {"name": "Porte AR",     "xA": int(crop_w*0.28),  "xB": int(crop_w*0.55), "yA": band_y1, "yB": band_y2},
+            {"name": "Aile AR",      "xA": int(crop_w*0.55),  "xB": int(crop_w*0.80), "yA": band_y1, "yB": band_y2},
+            {"name": "Pare-choc AR", "xA": int(crop_w*0.80),  "xB": crop_w,           "yA": band_y1, "yB": band_y2},
+        ], "angle 0-60, avant gauche -> 4 zones cote droit"
     else:
-        rear_on_right = True
-
-    # proportions : ailes ~18% (petites), portes ~32% (grandes)
-    aile_w  = int(crop_w * 0.18)
-    porte_w = int(crop_w * 0.32)
-
-    if rear_on_right:
-        # gauche -> AV (aile AV petite, porte AV grande)
-        # droite -> AR (porte AR grande, aile AR petite)
-        x0 = 0
-        x1 = x0 + aile_w
-        x2 = x1 + porte_w
-        x3 = x2 + porte_w
-        zones = [
-            {"name": "Aile AV",  "xA": x0, "xB": x1,     "yA": band_y1, "yB": band_y2},
-            {"name": "Porte AV", "xA": x1, "xB": x2,     "yA": band_y1, "yB": band_y2},
-            {"name": "Porte AR", "xA": x2, "xB": x3,     "yA": band_y1, "yB": band_y2},
-            {"name": "Aile AR",  "xA": x3, "xB": crop_w, "yA": band_y1, "yB": band_y2},
-        ]
-        return zones, f"angle {angle:.0f} (0-10) profil, AR a droite -> 2 portes + 2 ailes"
-    else:
-        x0 = 0
-        x1 = x0 + aile_w
-        x2 = x1 + porte_w
-        x3 = x2 + porte_w
-        zones = [
-            {"name": "Aile AR",  "xA": x0, "xB": x1,     "yA": band_y1, "yB": band_y2},
-            {"name": "Porte AR", "xA": x1, "xB": x2,     "yA": band_y1, "yB": band_y2},
-            {"name": "Porte AV", "xA": x2, "xB": x3,     "yA": band_y1, "yB": band_y2},
-            {"name": "Aile AV",  "xA": x3, "xB": crop_w, "yA": band_y1, "yB": band_y2},
-        ]
-        return zones, f"angle {angle:.0f} (0-10) profil, AR a gauche -> 2 portes + 2 ailes"
+        # avant a droite, arriere a gauche (gros cote = gauche)
+        return [
+            {"name": "Pare-choc AR", "xA": 0,                 "xB": int(crop_w*0.20), "yA": band_y1, "yB": band_y2},
+            {"name": "Aile AR",      "xA": int(crop_w*0.20),  "xB": int(crop_w*0.45), "yA": band_y1, "yB": band_y2},
+            {"name": "Porte AR",     "xA": int(crop_w*0.45),  "xB": int(crop_w*0.72), "yA": band_y1, "yB": band_y2},
+            {"name": "Porte AV",     "xA": int(crop_w*0.72),  "xB": crop_w,           "yA": band_y1, "yB": band_y2},
+        ], "angle 0-60, avant droit -> 4 zones cote gauche"
 
 
 # =========================
