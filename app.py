@@ -570,7 +570,7 @@ def analyse():
                 diff = float(np.linalg.norm(zone_color - ref_color))
                 if 14 <= diff < 26:
                     color_rect, verdict = (0, 0, 255),   "Peinture refaite!";  detected += 1
-                elif diff == 12.2:
+                elif 12.2<= diff <12.3:
                     color_rect, verdict = (0, 0, 255), "Peinture refaite!"; detected += 1    
                 elif diff < 14:
                     color_rect, verdict = (0, 165, 255), "Variation suspecte"; detected += 1
