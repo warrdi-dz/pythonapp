@@ -30,24 +30,24 @@ def call_yolo(image_path):
     except Exception as e:
         return {"error": "YOLO exception", "details": str(e)}
 
-# =========================
-# UPLOADS
-# =========================
 @app.route("/uploads/<filename>")
 def uploads(filename):
     return send_from_directory(UPLOAD_FOLDER, filename)
 
 @app.route("/")
 def home():
-    return jsonify({"status": "OK", "message": "GARAGE PRO V5 API (angle aware)"})
+    return jsonify({"status": "OK", "message": "GARAGE PRO V6 (3D zones)"})
+
 
 # =========================
-# COULEUR HSV MEDIANE
+# COULEUR HSV MEDIANE dans un POLYGONE
 # =========================
-def get_zone_color(hsv_img, mask, xA, yA, xB, yB):
-    zone_mask = mask[yA:yB, xA:xB]
-    zone_hsv  = hsv_img[yA:yB, xA:xB]
-    valid     = zone_hsv[zone_mask > 0]
+def get_poly_color(hsv_img, body_mask, polygon):
+    h, w = hsv_img.shape[:2]
+    poly_mask = np.zeros((h, w), dtype=np.uint8)
+    cv2.fillPoly(poly_mask, [np.array(polygon, dtype=np.int32)], 255)
+    combined = cv2.bitwise_and(poly_mask, body_mask)
+    valid = hsv_img[combined > 0]
     if len(valid) < 80:
         return None, 0
     return np.array([
@@ -55,6 +55,7 @@ def get_zone_color(hsv_img, mask, xA, yA, xB, yB):
         float(np.median(valid[:, 1])),
         float(np.median(valid[:, 2]))
     ]), len(valid)
+
 
 # =========================
 # REFINE CROP
@@ -90,8 +91,7 @@ def refine_car_bbox(img, x1, y1, x2, y2):
 
 
 # =========================
-# DETECTION FEUX (rouge / blanc) gauche & droite
-# Retourne dict avec comptages + ratios
+# DETECTION FEUX
 # =========================
 def detect_lights(car_crop):
     h, w = car_crop.shape[:2]
@@ -124,122 +124,266 @@ def detect_lights(car_crop):
 
 
 # =========================
-# ORIENTATION (basé sur feux)
+# DETECTION AVANT/ARRIERE EN PREMIER (basé sur les feux)
+#  - rear_side  = cote (left/right) ou se trouve l'arriere
+#  - front_side = cote oppose
+#  - facing     = "rear" (on voit surtout l'arriere) / "front" / "side"
 # =========================
-def detect_car_orientation(car_crop, lights=None):
+def detect_front_rear(lights):
     log = []
-    if lights is None:
-        lights = detect_lights(car_crop)
-
     rl, rr = lights["red_left"], lights["red_right"]
     wl, wr = lights["white_left"], lights["white_right"]
+    red_tot   = rl + rr
+    white_tot = wl + wr
 
-    # Priorité 1 : rouge
-    if (rl + rr) > 150:
-        if rl > rr * 1.35:
-            log.append(f"P1 ROUGE: G={rl} D={rr} -> avant DROITE (rouge=arriere G)")
-            return "right", log
-        if rr > rl * 1.35:
-            log.append(f"P1 ROUGE: G={rl} D={rr} -> avant GAUCHE (rouge=arriere D)")
-            return "left", log
-        log.append(f"P1 ROUGE equilibre ({rl}/{rr})")
+    # cote du rouge dominant
+    if rl > rr * 1.25:
+        rear_side = "left"
+    elif rr > rl * 1.25:
+        rear_side = "right"
+    else:
+        rear_side = None
 
-    # Priorité 2 : blanc
-    if (wl + wr) > 100:
-        if wl > wr * 1.35:
-            log.append(f"P2 PHARE: G={wl} D={wr} -> avant GAUCHE")
-            return "left", log
-        if wr > wl * 1.35:
-            log.append(f"P2 PHARE: G={wl} D={wr} -> avant DROITE")
-            return "right", log
-        log.append(f"P2 PHARE equilibre ({wl}/{wr})")
+    # cote du blanc dominant
+    if wl > wr * 1.25:
+        front_side = "left"
+    elif wr > wl * 1.25:
+        front_side = "right"
+    else:
+        front_side = None
 
-    # Fallback vitre
-    h, w = car_crop.shape[:2]
-    gray   = cv2.cvtColor(car_crop, cv2.COLOR_BGR2GRAY)
-    vitre  = gray[int(h*0.08):int(h*0.58), :]
-    dark   = (vitre < 90).astype(np.uint8)
-    dark_f = cv2.GaussianBlur(dark.astype(np.float32), (15, 15), 0)
-    mid    = w // 2
-    lg, rg = float(dark_f[:, :mid].sum()), float(dark_f[:, mid:].sum())
-    log.append(f"P3 VITRE: G={int(lg)} D={int(rg)}")
-    if lg > rg * 1.10:
-        return "left", log
-    return "right", log
+    # Si rouge tres dominant globalement -> on voit l'arriere
+    if red_tot > white_tot * 1.4 and red_tot > 200:
+        facing = "rear"
+    elif white_tot > red_tot * 1.4 and white_tot > 200:
+        facing = "front"
+    else:
+        facing = "side"
+
+    # Réconciliation: si on a un cote pour l'un, l'autre est oppose
+    if rear_side and not front_side:
+        front_side = "right" if rear_side == "left" else "left"
+    if front_side and not rear_side:
+        rear_side = "right" if front_side == "left" else "left"
+    if not rear_side and not front_side:
+        # fallback : on suppose arriere a droite
+        rear_side, front_side = "right", "left"
+        log.append("Pas de feux clairs -> fallback arriere=droite")
+
+    log.append(f"Feux rouge G={rl} D={rr} | blanc G={wl} D={wr}")
+    log.append(f"Total rouge={red_tot} blanc={white_tot} -> facing={facing}")
+    log.append(f"rear_side={rear_side} front_side={front_side}")
+    return rear_side, front_side, facing, log
+
+
+# =========================
+# CONSTRUCTION DE POLYGONES 3D (trapezes perspective)
+#
+# On modelise la voiture comme une bande horizontale qui suit la perspective:
+#  - top_y et bot_y varient lineairement selon x (la voiture s'eloigne)
+#  - le cote "loin" (vers l'avant fuyant) est plus etroit en hauteur
+#
+# perspective_factor : 0 = pas d'effet 3D, 0.2 = leger, 0.45 = vue 3/4 marquee
+# tilt_dir : +1 si le cote droit s'enfonce (top descend a droite),
+#            -1 si le cote gauche s'enfonce
+# =========================
+def make_poly(crop_w, crop_h, xA, xB, top_base, bot_base, perspective, tilt_dir):
+    # variation verticale du toit/bas selon position x (en fraction de crop_h)
+    def y_at(x_frac, base, drop):
+        # base in [0,1], drop = amplitude
+        if tilt_dir > 0:
+            # cote droit s'enfonce -> top descend a droite, bot remonte a droite
+            offset_top = perspective * drop * x_frac          # +y a droite
+            offset_bot = -perspective * drop * x_frac
+        else:
+            # cote gauche s'enfonce
+            offset_top = perspective * drop * (1 - x_frac)
+            offset_bot = -perspective * drop * (1 - x_frac)
+        return base + offset_top, (1 - base) + offset_bot   # not used
+
+    drop = 0.10  # amplitude verticale (fraction de crop_h)
+
+    def top_y(x):
+        f = x / max(1, crop_w)
+        if tilt_dir > 0:
+            return top_base + perspective * drop * f
+        else:
+            return top_base + perspective * drop * (1 - f)
+
+    def bot_y(x):
+        f = x / max(1, crop_w)
+        if tilt_dir > 0:
+            return bot_base - perspective * drop * f
+        else:
+            return bot_base - perspective * drop * (1 - f)
+
+    pts = [
+        (xA, int(top_y(xA) * crop_h)),
+        (xB, int(top_y(xB) * crop_h)),
+        (xB, int(bot_y(xB) * crop_h)),
+        (xA, int(bot_y(xA) * crop_h)),
+    ]
+    return pts
 
 
 # =========================
 # DECIDE ZONES par ANGLE
-#
-# angle 0-60   : 3/4 arriere -> 4 zones : pare-choc AR, porte AR, porte AV, aile AR
-#                (cote "avant" de l'image = arriere de la voiture)
-# angle 60-80  : presque profil arriere -> 3 zones : pare-choc AR, aile AR, porte AR
-# angle 80-90+ : pile arriere ou pile avant -> 1 zone : pare-choc (AR ou AV)
-#                sauf si les DEUX feux (rouge+blanc) visibles -> 4 zones (2 portes + 2 ailes)
+# IMPORTANT: l'orientation (avant/arriere) est decidee AVANT par detect_front_rear
+# Ici on utilise rear_side/front_side/facing + angle pour decider quoi scanner
+# Les zones sont retournees sous forme de polygones 3D (trapezes)
 # =========================
-def build_zones(crop_w, crop_h, angle, orientation, lights):
-    band_y1 = int(crop_h * 0.15)
-    band_y2 = int(crop_h * 0.80)
+def build_zones(crop_w, crop_h, angle, rear_side, front_side, facing, lights):
+    # tilt_dir: si rear_side == right, le cote droit s'eloigne donc s'enfonce -> +1
+    # mais en pratique pour 3/4 arriere, l'arriere est PROCHE de la camera (gros) et l'avant fuit
+    # donc le cote AVANT s'enfonce. tilt_dir va vers le cote AVANT.
+    tilt_dir = +1 if front_side == "right" else -1
 
-    rear_visible  = (lights["red_left"]   + lights["red_right"])   > 150
-    front_visible = (lights["white_left"] + lights["white_right"]) > 100
-
-    # ---- 80 - 90+ : vue frontale ou arriere pure ----
-    if angle >= 80:
-        if rear_visible and front_visible:
-            # cas special : on voit les 2 -> 4 zones (2 portes + 2 ailes)
-            q = crop_w // 4
-            return [
-                {"name": "Aile G",  "xA": 0,     "xB": q,       "yA": band_y1, "yB": band_y2},
-                {"name": "Porte G", "xA": q,     "xB": 2*q,     "yA": band_y1, "yB": band_y2},
-                {"name": "Porte D", "xA": 2*q,   "xB": 3*q,     "yA": band_y1, "yB": band_y2},
-                {"name": "Aile D",  "xA": 3*q,   "xB": crop_w,  "yA": band_y1, "yB": band_y2},
-            ], "angle>=80, 2 feux visibles -> 4 zones laterales"
-
-        # sinon : pare-choc seulement
-        name = "Pare-choc AR" if rear_visible else "Pare-choc AV"
-        return [
-            {"name": name, "xA": 0, "xB": crop_w, "yA": band_y1, "yB": band_y2},
-        ], f"angle>=80 -> 1 zone ({name})"
-
-    # ---- 60 - 80 : 3/4 fortement arriere ----
-    if angle >= 60:
-        # 3 zones cote arriere : pare-choc AR, aile AR, porte AR
-        # on place pare-choc du cote oppose a l'avant
-        if orientation == "left":
-            # avant a gauche => arriere a droite
-            return [
-                {"name": "Porte AR",     "xA": 0,             "xB": int(crop_w*0.40), "yA": band_y1, "yB": band_y2},
-                {"name": "Aile AR",      "xA": int(crop_w*0.40), "xB": int(crop_w*0.75), "yA": band_y1, "yB": band_y2},
-                {"name": "Pare-choc AR", "xA": int(crop_w*0.75), "xB": crop_w,         "yA": band_y1, "yB": band_y2},
-            ], "angle 60-80, avant gauche -> 3 zones AR a droite"
-        else:
-            return [
-                {"name": "Pare-choc AR", "xA": 0,             "xB": int(crop_w*0.25), "yA": band_y1, "yB": band_y2},
-                {"name": "Aile AR",      "xA": int(crop_w*0.25), "xB": int(crop_w*0.60), "yA": band_y1, "yB": band_y2},
-                {"name": "Porte AR",     "xA": int(crop_w*0.60), "xB": crop_w,         "yA": band_y1, "yB": band_y2},
-            ], "angle 60-80, avant droit -> 3 zones AR a gauche"
-
-    # ---- 0 - 60 : 3/4 leger -> 4 zones (cote large complet) ----
-    # Le cote ou se trouve l'arriere (feu rouge gros) est le cote "large"
-    # -> on scanne : pare-choc AR + aile AR + porte AR + porte AV
-    # L'aile AVANT du cote oppose est petite (non scannable) donc ignoree
-    if orientation == "left":
-        # avant a gauche, arriere a droite (gros cote = droite)
-        return [
-            {"name": "Porte AV",     "xA": 0,                 "xB": int(crop_w*0.28), "yA": band_y1, "yB": band_y2},
-            {"name": "Porte AR",     "xA": int(crop_w*0.28),  "xB": int(crop_w*0.55), "yA": band_y1, "yB": band_y2},
-            {"name": "Aile AR",      "xA": int(crop_w*0.55),  "xB": int(crop_w*0.80), "yA": band_y1, "yB": band_y2},
-            {"name": "Pare-choc AR", "xA": int(crop_w*0.80),  "xB": crop_w,           "yA": band_y1, "yB": band_y2},
-        ], "angle 0-60, avant gauche -> 4 zones cote droit"
+    # perspective amplitude en fonction de l'angle
+    # angle 0 = profil pur -> pas de perspective verticale (rectangles)
+    # angle 30-60 = 3/4 marque -> perspective forte
+    # angle >80 = face/arriere -> rectangles aussi
+    if angle <= 5 or angle >= 85:
+        persp = 0.0
+    elif angle <= 30:
+        persp = 0.5 * (angle / 30.0)
+    elif angle <= 60:
+        persp = 0.5 + 0.4 * ((angle - 30) / 30.0)   # 0.5 -> 0.9
     else:
-        # avant a droite, arriere a gauche (gros cote = gauche)
-        return [
-            {"name": "Pare-choc AR", "xA": 0,                 "xB": int(crop_w*0.20), "yA": band_y1, "yB": band_y2},
-            {"name": "Aile AR",      "xA": int(crop_w*0.20),  "xB": int(crop_w*0.45), "yA": band_y1, "yB": band_y2},
-            {"name": "Porte AR",     "xA": int(crop_w*0.45),  "xB": int(crop_w*0.72), "yA": band_y1, "yB": band_y2},
-            {"name": "Porte AV",     "xA": int(crop_w*0.72),  "xB": crop_w,           "yA": band_y1, "yB": band_y2},
-        ], "angle 0-60, avant droit -> 4 zones cote gauche"
+        persp = max(0.0, 0.9 - (angle - 60) * 0.03)
+
+    top_base = 0.22
+    bot_base = 0.85
+
+    # -------- VUE ARRIERE PURE (facing rear et angle haut) --------
+    if facing == "rear" and angle >= 75:
+        # 1 seule zone : pare-choc AR (toute la largeur)
+        return [{
+            "name": "Pare-choc AR",
+            "poly": make_poly(crop_w, crop_h, 0, crop_w, top_base, bot_base, 0.0, tilt_dir)
+        }], f"angle>=75 facing=rear -> Pare-choc AR seul"
+
+    # -------- VUE AVANT PURE --------
+    if facing == "front" and angle >= 75:
+        return [{
+            "name": "Pare-choc AV",
+            "poly": make_poly(crop_w, crop_h, 0, crop_w, top_base, bot_base, 0.0, tilt_dir)
+        }], f"angle>=75 facing=front -> Pare-choc AV seul"
+
+    # -------- PROFIL PUR (angle ~0) --------
+    if angle <= 10:
+        # 4 zones laterales : 2 grandes (portes) + 2 petites (ailes)
+        # Cote rear_side = aile AR + porte AR (vers feu rouge)
+        # Cote front_side = porte AV + aile AV (vers feu blanc)
+        if rear_side == "right":
+            zones = [
+                ("Aile AV",  0.00, 0.18),
+                ("Porte AV", 0.18, 0.50),
+                ("Porte AR", 0.50, 0.82),
+                ("Aile AR",  0.82, 1.00),
+            ]
+        else:
+            zones = [
+                ("Aile AR",  0.00, 0.18),
+                ("Porte AR", 0.18, 0.50),
+                ("Porte AV", 0.50, 0.82),
+                ("Aile AV",  0.82, 1.00),
+            ]
+        out = [{
+            "name": n,
+            "poly": make_poly(crop_w, crop_h, int(a*crop_w), int(b*crop_w),
+                              top_base, bot_base, persp, tilt_dir)
+        } for (n, a, b) in zones]
+        return out, "angle<=10 profil pur -> 4 zones laterales"
+
+    # -------- 3/4 LEGER 10-30 : cote dominant selon feu --------
+    if angle <= 30:
+        if facing == "rear" or (lights["red_left"] + lights["red_right"]) > (lights["white_left"] + lights["white_right"]):
+            # cote arriere visible: Pare-choc AR + Aile AR + Malle + Porte AR
+            if rear_side == "right":
+                zones = [
+                    ("Porte AR", 0.30, 0.55),
+                    ("Malle",    0.55, 0.72),
+                    ("Aile AR",  0.72, 0.88),
+                    ("Pare-choc AR", 0.88, 1.00),
+                ]
+            else:
+                zones = [
+                    ("Pare-choc AR", 0.00, 0.12),
+                    ("Aile AR",  0.12, 0.28),
+                    ("Malle",    0.28, 0.45),
+                    ("Porte AR", 0.45, 0.70),
+                ]
+            label = "angle 10-30 -> cote AR visible"
+        else:
+            # cote avant visible
+            if front_side == "right":
+                zones = [
+                    ("Porte AV", 0.30, 0.55),
+                    ("Capot",    0.55, 0.72),
+                    ("Aile AV",  0.72, 0.88),
+                    ("Pare-choc AV", 0.88, 1.00),
+                ]
+            else:
+                zones = [
+                    ("Pare-choc AV", 0.00, 0.12),
+                    ("Aile AV",  0.12, 0.28),
+                    ("Capot",    0.28, 0.45),
+                    ("Porte AV", 0.45, 0.70),
+                ]
+            label = "angle 10-30 -> cote AV visible"
+
+        out = [{
+            "name": n,
+            "poly": make_poly(crop_w, crop_h, int(a*crop_w), int(b*crop_w),
+                              top_base, bot_base, persp, tilt_dir)
+        } for (n, a, b) in zones]
+        return out, label
+
+    # -------- 3/4 MARQUE 30-70 --------
+    if angle <= 70:
+        if facing != "front":
+            # 3/4 AR marque : Pare-choc AR + Malle + Aile AR
+            if rear_side == "right":
+                zones = [
+                    ("Aile AR",      0.55, 0.78),
+                    ("Malle",        0.78, 0.92),
+                    ("Pare-choc AR", 0.92, 1.00),
+                ]
+            else:
+                zones = [
+                    ("Pare-choc AR", 0.00, 0.08),
+                    ("Malle",        0.08, 0.22),
+                    ("Aile AR",      0.22, 0.45),
+                ]
+            label = "angle 30-70 -> 3/4 AR (parchoq+malle+aile)"
+        else:
+            if front_side == "right":
+                zones = [
+                    ("Aile AV",      0.55, 0.78),
+                    ("Capot",        0.78, 0.92),
+                    ("Pare-choc AV", 0.92, 1.00),
+                ]
+            else:
+                zones = [
+                    ("Pare-choc AV", 0.00, 0.08),
+                    ("Capot",        0.08, 0.22),
+                    ("Aile AV",      0.22, 0.45),
+                ]
+            label = "angle 30-70 -> 3/4 AV (parchoq+capot+aile)"
+
+        out = [{
+            "name": n,
+            "poly": make_poly(crop_w, crop_h, int(a*crop_w), int(b*crop_w),
+                              top_base, bot_base, persp, tilt_dir)
+        } for (n, a, b) in zones]
+        return out, label
+
+    # -------- 70-85 quasi face/arriere --------
+    name = "Pare-choc AR" if facing != "front" else "Pare-choc AV"
+    return [{
+        "name": name,
+        "poly": make_poly(crop_w, crop_h, 0, crop_w, top_base, bot_base, 0.0, tilt_dir)
+    }], f"angle 70-85 -> {name} seul"
 
 
 # =========================
@@ -251,12 +395,11 @@ def analyse():
         if "image" not in request.files:
             return jsonify({"error": "no image"}), 400
 
-        # angle (degres) : 0 = vue laterale pure, 90 = vue frontale/arriere pure
         try:
             angle = float(request.form.get("angle", "30"))
         except Exception:
             angle = 30.0
-        angle = max(0.0, min(angle, 90.0))
+        angle = max(0.0, min(angle, 180.0))
 
         file     = request.files["image"]
         filename = str(int(time.time())) + "_" + secure_filename(file.filename)
@@ -299,15 +442,16 @@ def analyse():
             return jsonify({"error": "invalid crop"}), 400
         crop_h, crop_w = car_crop.shape[:2]
 
-        # ---- feux + orientation ----
+        # ===== 1) DETECTION AVANT/ARRIERE EN PREMIER =====
         lights = detect_lights(car_crop)
-        orientation, orient_log = detect_car_orientation(car_crop, lights)
+        rear_side, front_side, facing, fr_log = detect_front_rear(lights)
 
-        # ---- zones selon angle ----
-        zones, zone_decision = build_zones(crop_w, crop_h, angle, orientation, lights)
-        orient_log.append(f"ANGLE={angle} -> {zone_decision}")
+        # ===== 2) ZONES selon ANGLE + orientation deja decidee =====
+        zones, zone_decision = build_zones(crop_w, crop_h, angle,
+                                           rear_side, front_side, facing, lights)
+        fr_log.append(f"ANGLE={angle} -> {zone_decision}")
 
-        # ---- masque carrosserie + ref globale ----
+        # ===== 3) Masque carrosserie + ref globale =====
         hsv_full  = cv2.cvtColor(car_crop, cv2.COLOR_BGR2HSV)
         mask_dark = cv2.inRange(hsv_full, (0, 0, 0),   (180, 255, 45))
         mask_sky  = cv2.inRange(hsv_full, (0, 0, 210), (180, 18, 255))
@@ -324,26 +468,28 @@ def analyse():
             float(np.median(all_valid[:, 2]))
         ])
 
-        # ---- dessin ----
+        # ===== 4) Dessin avec polygones 3D numerotes =====
         final_img = img_orig.copy()
-        thick_box   = max(3, int(5  * min(scale_x, scale_y)))
-        thick_line  = max(1, int(1  * min(scale_x, scale_y)))
-        font_big    = max(0.6, 0.6  * min(scale_x, scale_y))
-        font_med    = max(0.5, 0.5  * min(scale_x, scale_y))
-        font_thick  = max(2, int(2  * min(scale_x, scale_y)))
-        overlay_h   = max(55, int(55 * scale_y))
+        thick_box   = max(3, int(4 * min(scale_x, scale_y)))
+        thick_line  = max(1, int(1 * min(scale_x, scale_y)))
+        font_big    = max(0.6, 0.6 * min(scale_x, scale_y))
+        font_med    = max(0.5, 0.5 * min(scale_x, scale_y))
+        font_thick  = max(2, int(2 * min(scale_x, scale_y)))
 
         cv2.rectangle(final_img, (x1, y1), (x2, y2), (220, 220, 220), thick_line)
 
         results_zones = []
         detected = 0
 
-        for zone in zones:
-            xA, xB, yA, yB = zone["xA"], zone["xB"], zone["yA"], zone["yB"]
-            zone_color, px_count = get_zone_color(hsv_full, mask_body, xA, yA, xB, yB)
+        for idx, zone in enumerate(zones, start=1):
+            poly_local = zone["poly"]
+            # convertir en coords image globale
+            poly_global = np.array(
+                [[x1 + p[0], y1 + p[1]] for p in poly_local],
+                dtype=np.int32
+            )
 
-            abs_x1 = x1 + xA; abs_y1 = y1 + yA
-            abs_x2 = x1 + xB; abs_y2 = y1 + yB
+            zone_color, px_count = get_poly_color(hsv_full, mask_body, poly_local)
 
             if zone_color is None:
                 color_rect  = (150, 150, 150)
@@ -359,24 +505,52 @@ def analyse():
                     color_rect = (0, 210, 0);   verdict = "OK"; detected += 1
                 label_score = str(int(diff))
 
-            cv2.rectangle(final_img, (abs_x1, abs_y1), (abs_x2, abs_y2), color_rect, thick_box)
+            # remplissage semi-transparent du polygone
             overlay = final_img.copy()
-            cv2.rectangle(overlay, (abs_x1, abs_y1), (abs_x2, abs_y1 + overlay_h), (0,0,0), -1)
-            cv2.addWeighted(overlay, 0.5, final_img, 0.5, 0, final_img)
+            cv2.fillPoly(overlay, [poly_global], color_rect)
+            cv2.addWeighted(overlay, 0.25, final_img, 0.75, 0, final_img)
 
-            cv2.putText(final_img, zone["name"],
-                        (abs_x1 + 8, abs_y1 + int(overlay_h * 0.40)),
-                        cv2.FONT_HERSHEY_SIMPLEX, font_big, (255,255,255), font_thick)
-            cv2.putText(final_img, f"Ecart: {label_score}",
-                        (abs_x1 + 8, abs_y1 + int(overlay_h * 0.80)),
-                        cv2.FONT_HERSHEY_SIMPLEX, font_med, color_rect, font_thick)
-            cv2.putText(final_img, verdict,
-                        (abs_x1 + 8, abs_y2 - int(10 * scale_y)),
-                        cv2.FONT_HERSHEY_SIMPLEX, font_med, color_rect, font_thick)
+            # contour du polygone 3D
+            cv2.polylines(final_img, [poly_global], True, color_rect, thick_box)
+
+            # centre du polygone pour le numero
+            cx = int(np.mean(poly_global[:, 0]))
+            cy = int(np.mean(poly_global[:, 1]))
+
+            # cercle numerote (style 3D : ombre + cercle plein)
+            radius = max(18, int(22 * min(scale_x, scale_y)))
+            cv2.circle(final_img, (cx + 2, cy + 2), radius, (0, 0, 0), -1)
+            cv2.circle(final_img, (cx, cy), radius, color_rect, -1)
+            cv2.circle(final_img, (cx, cy), radius, (255, 255, 255), 2)
+            num_txt = str(idx)
+            (tw, th), _ = cv2.getTextSize(num_txt, cv2.FONT_HERSHEY_SIMPLEX,
+                                          font_big * 1.4, font_thick + 1)
+            cv2.putText(final_img, num_txt,
+                        (cx - tw // 2, cy + th // 2),
+                        cv2.FONT_HERSHEY_SIMPLEX, font_big * 1.4,
+                        (255, 255, 255), font_thick + 1)
+
+            # etiquette au-dessus du polygone
+            top_pt = poly_global[poly_global[:, 1].argmin()]
+            lbl_x, lbl_y = int(top_pt[0]), max(20, int(top_pt[1]) - 12)
+            label_full = f"{idx}. {zone['name']}  E:{label_score}"
+            (lw, lh), _ = cv2.getTextSize(label_full, cv2.FONT_HERSHEY_SIMPLEX,
+                                          font_med, font_thick)
+            cv2.rectangle(final_img,
+                          (lbl_x - 4, lbl_y - lh - 6),
+                          (lbl_x + lw + 6, lbl_y + 4),
+                          (0, 0, 0), -1)
+            cv2.putText(final_img, label_full, (lbl_x, lbl_y),
+                        cv2.FONT_HERSHEY_SIMPLEX, font_med,
+                        (255, 255, 255), font_thick)
 
             results_zones.append({
-                "zone": zone["name"], "diff": round(diff,1),
-                "pixels": px_count, "verdict": verdict
+                "idx": idx,
+                "zone": zone["name"],
+                "diff": round(diff, 1),
+                "pixels": px_count,
+                "verdict": verdict,
+                "polygon": poly_global.tolist()
             })
 
         diffs = [z["diff"] for z in results_zones if z["diff"] > 0]
@@ -398,14 +572,16 @@ def analyse():
             "result":          result,
             "zones":           results_zones,
             "zones_detected":  detected,
-            "orientation":     orientation,
-            "orientation_log": orient_log,
+            "facing":          facing,
+            "rear_side":       rear_side,
+            "front_side":      front_side,
+            "orientation_log": fr_log,
             "lights":          lights,
             "image_size":      {"width": orig_w, "height": orig_h},
             "reference_hsv": {
-                "H": round(ref_color[0],1),
-                "S": round(ref_color[1],1),
-                "V": round(ref_color[2],1)
+                "H": round(ref_color[0], 1),
+                "S": round(ref_color[1], 1),
+                "V": round(ref_color[2], 1)
             },
             "image_result":    analysed_name,
             "image_url":       request.host_url + "uploads/" + analysed_name
