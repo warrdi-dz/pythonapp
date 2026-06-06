@@ -293,7 +293,7 @@ def build_zones(crop_w, crop_h, angle, rear_side, front_side, facing, lights):
         return out, label
 
     # =============== 0-10  PROFIL PUR ===============
-    if angle = 180:
+    if angle <= 180:
         if near_side == "right":
             zones = [
                 (f"Aile {'AV' if is_rear else 'AR'}",  0.00, 0.18),
