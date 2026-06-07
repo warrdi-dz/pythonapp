@@ -568,7 +568,7 @@ def analyse():
                 color_rect, label_score, diff, verdict = (150,150,150), "N/A", 0.0, "Non analysable"
             else:
                 diff = float(np.linalg.norm(zone_color - ref_color))
-                if 14 <= diff < 26:
+                if 14 <= diff < 20:
                     color_rect, verdict = (0, 0, 255),   "Peinture refaite!";  detected += 1
                 elif 12.2<= diff <12.3:
                     color_rect, verdict = (0, 0, 255), "Peinture refaite!"; detected += 1    
