@@ -73,18 +73,26 @@ def home():
 # =========================
 def get_poly_color(hsv_img, body_mask, polygon):
     h, w = hsv_img.shape[:2]
+
     poly_mask = np.zeros((h, w), dtype=np.uint8)
     cv2.fillPoly(poly_mask, [np.array(polygon, dtype=np.int32)], 255)
+
     combined = cv2.bitwise_and(poly_mask, body_mask)
     valid = hsv_img[combined > 0]
-    if len(valid) < 80:
-        return None, 0
-    return np.array([
-        float(np.median(valid[:, 0])),
-        float(np.median(valid[:, 1])),
-        float(np.median(valid[:, 2]))
-    ]), len(valid)
 
+    if len(valid) < 80:
+        return None, 0, 0, 0
+
+    color = np.array([
+        float(np.median(valid[:,0])),
+        float(np.median(valid[:,1])),
+        float(np.median(valid[:,2]))
+    ])
+
+    std_s = float(np.std(valid[:,1]))
+    std_v = float(np.std(valid[:,2]))
+
+    return color, len(valid), std_s, std_v
 
 # =========================
 # REFINE CROP
@@ -562,7 +570,7 @@ def analyse():
                 [[x1 + p[0], y1 + p[1]] for p in poly_local], dtype=np.int32
             )
 
-            zone_color, px_count = get_poly_color(hsv_full, mask_body, poly_local)
+            zone_color, px_count,std_s, std_v = get_poly_color(hsv_full, mask_body, poly_local)
 
             if zone_color is None:
                 color_rect, label_score, diff, verdict = (150,150,150), "N/A", 0.0, "Non analysable"
