@@ -572,7 +572,7 @@ def analyse():
                     color_rect, verdict = (0, 0, 255),   "Peinture refaite!";  detected += 1
                 elif 12.2<= diff <12.3:
                     color_rect, verdict = (0, 0, 255), "Peinture refaite!"; detected += 1    
-                elif diff < 14:
+                elif 10 <=diff < 14:
                     color_rect, verdict = (0, 165, 255), "Variation suspecte"; detected += 1
                 else:
                     color_rect, verdict = (0, 210, 0),   "OK"
