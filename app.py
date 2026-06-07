@@ -582,7 +582,7 @@ def analyse():
                 elif diff <= 10 and (std_s > 22 or std_v > 25):
                     color_rect, verdict = (0,0,255), "Peinture refaite!"
                     detected += 1
-                elif diff >= 6:
+                elif diff =< 6:
                     color_rect, verdict = (0,165,255), "Variation suspecte"
                     detected += 1
                 else:
