@@ -587,7 +587,7 @@ def analyse():
                     detected += 1
                 else:
                      color_rect, verdict = (0,210,0), "OK"
-                 label_score = str(int(diff))
+                label_score = str(int(diff))
 
             overlay = final_img.copy()
             cv2.fillPoly(overlay, [poly_global], color_rect)
