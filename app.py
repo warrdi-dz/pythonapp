@@ -628,11 +628,11 @@ def analyse():
                     # avec celle de la voiture. Repeinture mate/brillante
                     # se traduit par une zone plus sombre OU plus claire.
                     # Tolerance large car reflets/vitres tirent V.
-                    if   diff_v_med >= 45.0 and std_s >= 25.0:
+                    if   diff_v_med <= 45.0 and std_s <= 25.0:
                         verdict_state = "refaite"
-                    elif diff_v_med >= 60.0:
+                    elif diff_v_med <= 60.0:
                         verdict_state = "refaite"
-                    elif diff_v_med >= 30.0 and std_s >= 35.0:
+                    elif diff_v_med <= 30.0 and std_s <= 35.0:
                         verdict_state = "suspecte"
                     else:
                         verdict_state = "ok"
