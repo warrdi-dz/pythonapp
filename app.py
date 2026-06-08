@@ -612,7 +612,7 @@ def analyse():
                     # sinon on demande confirmation par std_s eleve
                     if   diff >= 15.0:
                         verdict_state = "refaite"
-                    elif diff >= 7.0 and std_s >= 14.0:
+                    elif diff >= 7.0 and std_s <= 10.0:
                         verdict_state = "refaite"
                     elif diff >= 7.0:
                         verdict_state = "suspecte"
