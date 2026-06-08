@@ -586,17 +586,48 @@ def analyse():
                 #   - diff (mediane H)  : couleur globale
                 #   - std_s             : empreinte chimique de la peinture
                 #   - std_v             : texture / mastic / grain
-                suspect_color   = 2<= diff  <= 4
-                suspect_satur   = std_s > 7
-                suspect_texture = std_v < 15
+                # =====================================================
+                # SCORE COMBINE (juste milieu)
+                # On combine 3 signaux pour eviter faux positifs/negatifs :
+                #   - diff   : ecart de TEINTE (H) vs reference voiture
+                #   - std_s  : dispersion de SATURATION (empreinte peinture)
+                #   - std_v  : dispersion de VALEUR    (texture / mastic)
+                #
+                # Chaque signal a 2 niveaux : faible et fort.
+                # Verdict :
+                #   - 2 signaux FORTS                    -> Refaite
+                #   - 1 signal FORT + 1 signal FAIBLE    -> Refaite
+                #   - 2 signaux FAIBLES                  -> Suspecte
+                #   - sinon                              -> OK
+                # Cela evite qu'un seul std_v eleve (reflet) declenche
+                # un faux positif, et detecte la peinture refaite meme
+                # quand la teinte H seule reste proche.
+                # =====================================================
+                weak_color   = diff  > 5.0
+                weak_satur   = std_s > 6.5
+                weak_texture = std_v > 25.0
 
-                if suspect_color and suspect_satur:
+                strong_color   = diff  > 10.0
+                strong_satur   = std_s > 10.0
+                strong_texture = std_v > 38.0
+
+                n_weak   = int(weak_color)   + int(weak_satur)   + int(weak_texture)
+                n_strong = int(strong_color) + int(strong_satur) + int(strong_texture)
+
+                # Score numerique pondere (pour affichage / tri)
+                combo_score = (
+                    diff * 1.4 +
+                    max(0.0, std_s - 5.0) * 1.3 +
+                    max(0.0, std_v - 22.0) * 0.35
+                )
+
+                if n_strong >= 2 or (n_strong >= 1 and n_weak >= 2):
                     color_rect, verdict = (0, 0, 255),   "Peinture refaite!";  detected += 1
-                elif suspect_color or (suspect_satur and suspect_texture):
+                elif n_weak >= 2:
                     color_rect, verdict = (0, 165, 255), "Variation suspecte"; detected += 1
                 else:
                     color_rect, verdict = (0, 210, 0),   "OK"
-                label_score = f"H{int(diff)}/S{int(std_s)}/V{int(std_v)}"
+                label_score = f"H{int(diff)}/S{int(std_s)}/V{int(std_v)}/C{int(combo_score)}"
 
             overlay = final_img.copy()
             cv2.fillPoly(overlay, [poly_global], color_rect)
