@@ -603,12 +603,12 @@ def analyse():
                 # un faux positif, et detecte la peinture refaite meme
                 # quand la teinte H seule reste proche.
                 # =====================================================
-                weak_color   = diff  > 5.0
-                weak_satur   = std_s > 6.5
+                weak_color   = diff  < 5.0
+                weak_satur   = std_s < 6.5
                 weak_texture = std_v > 25.0
 
-                strong_color   = diff  > 10.0
-                strong_satur   = std_s > 10.0
+                strong_color   = diff  < 10.0
+                strong_satur   = std_s < 10.0
                 strong_texture = std_v > 38.0
 
                 n_weak   = int(weak_color)   + int(weak_satur)   + int(weak_texture)
