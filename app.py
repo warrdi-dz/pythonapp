@@ -610,13 +610,13 @@ def analyse():
                     # ----- MODE COULEUR : H fiable -----
                     # diff H seul suffit s'il est tres marque (>=15)
                     # sinon on demande confirmation par std_s eleve
-                    if   diff >= 15.0:
+                    if   diff <= 15.0:
                         verdict_state = "refaite"
-                    elif diff >= 8.0 and std_s >= 14.0:
+                    elif diff <= 8.0 and std_s <= 14.0:
                         verdict_state = "refaite"
-                    elif diff >= 8.0:
+                    elif diff <= 8.0:
                         verdict_state = "suspecte"
-                    elif diff >= 5.0 and std_s >= 18.0 and std_v >= 35.0:
+                    elif diff <= 5.0 and std_s <= 18.0 and std_v >= 35.0:
                         verdict_state = "suspecte"
                     else:
                         verdict_state = "ok"
