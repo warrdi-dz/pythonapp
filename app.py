@@ -65,7 +65,7 @@ def uploads(filename):
 
 @app.route("/")
 def home():
-    return jsonify({"status": "OK", "message": "GARAGE PRO V7"})
+    return jsonify({"status": "OK", "message": "GARAGE PRO V6"})
 
 
 # =========================
@@ -78,18 +78,12 @@ def get_poly_color(hsv_img, body_mask, polygon):
     combined = cv2.bitwise_and(poly_mask, body_mask)
     valid = hsv_img[combined > 0]
     if len(valid) < 80:
-        return None, 0, None
-    med = np.array([
+        return None, 0
+    return np.array([
         float(np.median(valid[:, 0])),
         float(np.median(valid[:, 1])),
         float(np.median(valid[:, 2]))
-    ])
-    stats = {
-        "std_h": float(np.std(valid[:, 0])),
-        "std_s": float(np.std(valid[:, 1])),
-        "std_v": float(np.std(valid[:, 2])),
-    }
-    return med, len(valid), stats
+    ]), len(valid)
 
 
 # =========================
@@ -568,35 +562,19 @@ def analyse():
                 [[x1 + p[0], y1 + p[1]] for p in poly_local], dtype=np.int32
             )
 
-            zone_color, px_count, stats = get_poly_color(hsv_full, mask_body, poly_local)
+            zone_color, px_count = get_poly_color(hsv_full, mask_body, poly_local)
 
             if zone_color is None:
                 color_rect, label_score, diff, verdict = (150,150,150), "N/A", 0.0, "Non analysable"
-                std_h = std_s = std_v = 0.0
             else:
-                # ecart de TEINTE (H) seulement -> plus fiable que la norme HSV
-                diff_h = abs(float(zone_color[0]) - float(ref_color[0]))
-                diff_h = min(diff_h, 180.0 - diff_h)  # H est circulaire
-                diff   = diff_h
-                std_h  = stats["std_h"]
-                std_s  = stats["std_s"]
-                std_v  = stats["std_v"]
-
-                # CRITERES COMBINES :
-                #   - diff (mediane H)  : couleur globale
-                #   - std_s             : empreinte chimique de la peinture
-                #   - std_v             : texture / mastic / grain
-                suspect_color   = diff  < 7
-                suspect_satur   = std_s < 7
-                suspect_texture = std_v > 30
-
-                if suspect_color and suspect_satur:
+                diff = float(np.linalg.norm(zone_color - ref_color))
+                if 14 <= diff < 26:
                     color_rect, verdict = (0, 0, 255),   "Peinture refaite!";  detected += 1
-                elif suspect_color or (suspect_satur and suspect_texture):
+                elif diff < 14:
                     color_rect, verdict = (0, 165, 255), "Variation suspecte"; detected += 1
                 else:
                     color_rect, verdict = (0, 210, 0),   "OK"
-                label_score = f"H{int(diff)}/S{int(std_s)}/V{int(std_v)}"
+                label_score = str(int(diff))
 
             overlay = final_img.copy()
             cv2.fillPoly(overlay, [poly_global], color_rect)
@@ -629,7 +607,6 @@ def analyse():
 
             results_zones.append({
                 "idx": idx, "zone": zone["name"], "diff": round(diff, 1),
-                "std_h": round(std_h, 2), "std_s": round(std_s, 2), "std_v": round(std_v, 2),
                 "pixels": px_count, "verdict": verdict,
                 "polygon": poly_global.tolist()
             })
