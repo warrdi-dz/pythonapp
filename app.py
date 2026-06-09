@@ -16,7 +16,7 @@ YOLO_W = 900
 YOLO_H = 500
 
 # =========================
-# YOLO API CALL
+# YOLO API CALL  (detection + marque/modele si dispo)
 # =========================
 def call_yolo(image_path):
     url = "https://warrdi.com/pytho/detect"
@@ -35,6 +35,11 @@ def call_yolo(image_path):
 
 
 def call_car_make_model(image_path):
+    """
+    Tentative d'appel a un endpoint dedie marque/modele.
+    Si l'endpoint n'existe pas, on retourne Unknown sans bloquer.
+    L'endpoint attendu doit renvoyer {"make": "...", "model": "...", "confidence": 0.x}
+    """
     url = "https://warrdi.com/pytho/car_make_model"
     try:
         ext  = os.path.splitext(image_path)[1].lower()
@@ -60,7 +65,7 @@ def uploads(filename):
 
 @app.route("/")
 def home():
-    return jsonify({"status": "OK", "message": "GARAGE PRO V10"})
+    return jsonify({"status": "OK", "message": "GARAGE PRO V7"})
 
 
 # =========================
@@ -122,10 +127,19 @@ def refine_car_bbox(img, x1, y1, x2, y2):
 
 # =========================
 # DETECTION FEUX
+#
+# CORRECTION CRITIQUE :
+# - Bande verticale resserree (40%-80% au lieu de 30%-92%) pour
+#   exclure le mur/le ciel/le toit
+# - Plage ROUGE elargie en saturation (les feux LED sont satures meme
+#   eteints, le rouge sature est tres rare dans une scene exterieure)
+# - Plage BLANC/JAUNE plus stricte (S maxi reduit, V mini eleve)
+#   pour ne pas confondre un mur beige avec un phare
 # =========================
 def detect_lights(car_crop):
     h, w = car_crop.shape[:2]
     band_w  = int(w * 0.28)
+    # Bande resserree autour de la hauteur des feux uniquement
     feux_y1 = int(h * 0.40)
     feux_y2 = int(h * 0.78)
 
@@ -135,12 +149,15 @@ def detect_lights(car_crop):
     right_hsv  = cv2.cvtColor(right_feux, cv2.COLOR_BGR2HSV)
 
     def count_red(hsv):
+        # Rouge sature uniquement (S>=90, V>=70) — les murs beiges sont S<60
         m1 = cv2.inRange(hsv, (0,   90, 70),  (12,  255, 255))
         m2 = cv2.inRange(hsv, (165, 90, 70),  (180, 255, 255))
         return int(cv2.countNonZero(cv2.bitwise_or(m1, m2)))
 
     def count_white(hsv):
+        # Blanc TRES brillant uniquement (V>=210, S<=60) — exclut murs beiges
         white = cv2.inRange(hsv, (0, 0, 210), (180, 60, 255))
+        # Jaune des clignotants : sature ET brillant
         yellow = cv2.inRange(hsv, (18, 130, 190), (35, 255, 255))
         return int(cv2.countNonZero(cv2.bitwise_or(white, yellow)))
 
@@ -151,9 +168,12 @@ def detect_lights(car_crop):
     band_area = band_w * (feux_y2 - feux_y1)
 
     return {
-        "red_left":    rl, "red_right":   rr,
-        "white_left":  wl, "white_right": wr,
-        "red_tot":     rl + rr, "white_tot":   wl + wr,
+        "red_left":    rl,
+        "red_right":   rr,
+        "white_left":  wl,
+        "white_right": wr,
+        "red_tot":     rl + rr,
+        "white_tot":   wl + wr,
         "band_area":   band_area,
         "red_left_ratio":  rl / max(band_area, 1),
         "red_right_ratio": rr / max(band_area, 1),
@@ -164,6 +184,11 @@ def detect_lights(car_crop):
 
 # =========================
 # DETECTION AVANT/ARRIERE
+#
+# PRIORITE AU ROUGE :
+# Le rouge sature est rare dans une scene exterieure. S'il est
+# present en quantite significative, c'est forcement un feu arriere.
+# Le "blanc" peut etre un mur, un trottoir, du ciel, etc.
 # =========================
 def detect_front_rear(lights):
     log = []
@@ -173,52 +198,71 @@ def detect_front_rear(lights):
     white_tot = wl + wr
     band_area = lights["band_area"]
 
+    # Seuil minimal pour qu'un feu rouge soit considere "present"
     red_thr   = max(120, int(band_area * 0.003))
-    white_thr = max(400, int(band_area * 0.020))
+    white_thr = max(400, int(band_area * 0.020))   # exigence plus forte
 
+    # ----- PRIORITE 1 : rouge significatif = arriere -----
     if red_tot >= red_thr:
         facing = "rear"
-        log.append(f"facing=REAR (rouge tot={red_tot} >= {red_thr})")
+        log.append(f"facing=REAR (rouge significatif tot={red_tot} >= seuil {red_thr})")
+    # ----- PRIORITE 2 : blanc tres dominant = avant -----
     elif white_tot >= white_thr and white_tot > red_tot * 3:
         facing = "front"
-        log.append(f"facing=FRONT (blanc tot={white_tot})")
+        log.append(f"facing=FRONT (blanc dominant tot={white_tot})")
     else:
         facing = "side"
         log.append(f"facing=SIDE (red={red_tot} white={white_tot})")
 
-    if rl > rr * 1.25:   rear_side = "left"
-    elif rr > rl * 1.25: rear_side = "right"
-    else:                rear_side = None
+    # Cote du feu rouge dominant
+    if rl > rr * 1.25:
+        rear_side = "left"
+    elif rr > rl * 1.25:
+        rear_side = "right"
+    else:
+        rear_side = None
 
-    if wl > wr * 1.25:   front_side = "left"
-    elif wr > wl * 1.25: front_side = "right"
-    else:                front_side = None
+    # Cote des phares dominants
+    if wl > wr * 1.25:
+        front_side = "left"
+    elif wr > wl * 1.25:
+        front_side = "right"
+    else:
+        front_side = None
 
+    # Reconciliation
     if rear_side and not front_side:
         front_side = "right" if rear_side == "left" else "left"
     if front_side and not rear_side:
         rear_side = "right" if front_side == "left" else "left"
     if not rear_side and not front_side:
         rear_side, front_side = "right", "left"
-        log.append("Fallback")
+        log.append("Fallback: arriere=droite")
 
     log.append(f"rouge G={rl} D={rr} | blanc G={wl} D={wr}")
     log.append(f"rear_side={rear_side} front_side={front_side}")
     return rear_side, front_side, facing, log
 
 
+# =========================
+# ESTIMER L'ANGLE DE VUE
+# =========================
 def estimate_angle(lights, crop_w, crop_h, facing):
     rl, rr = lights["red_left"],   lights["red_right"]
     wl, wr = lights["white_left"], lights["white_right"]
+
     if facing == "rear":
         big = max(rl, rr); sml = min(rl, rr)
     elif facing == "front":
         big = max(wl, wr); sml = min(wl, wr)
     else:
         big = max(rl + wl, rr + wr); sml = min(rl + wl, rr + wr)
+
     if big == 0:
         return 45.0
+
     sym_ratio = big / max(sml, 1)
+
     if sym_ratio >= 8.0:
         angle = 10.0
     elif sym_ratio >= 4.0:
@@ -229,20 +273,29 @@ def estimate_angle(lights, crop_w, crop_h, facing):
         angle = 65.0 + (2.0 - sym_ratio) / 0.7 * 20.0
     else:
         angle = 87.0
+
     ratio_wh = crop_w / max(crop_h, 1)
-    if ratio_wh > 1.6:   angle = min(angle, 35.0)
-    elif ratio_wh < 0.9: angle = max(angle, 60.0)
+    if ratio_wh > 1.6:
+        angle = min(angle, 35.0)
+    elif ratio_wh < 0.9:
+        angle = max(angle, 60.0)
+
     return round(angle, 1)
 
 
+# =========================
+# POLYGONE TRAPEZE PERSPECTIF
+# =========================
 def make_poly(crop_w, crop_h, xA, xB, top_base, bot_base, persp, tilt_dir):
     drop = 0.08
     def top_y(x):
         f = x / max(1, crop_w)
-        return top_base + (persp * drop * f if tilt_dir > 0 else persp * drop * (1 - f))
+        return top_base + (persp * drop * f if tilt_dir > 0
+                           else persp * drop * (1 - f))
     def bot_y(x):
         f = x / max(1, crop_w)
-        return bot_base - (persp * drop * f if tilt_dir > 0 else persp * drop * (1 - f))
+        return bot_base - (persp * drop * f if tilt_dir > 0
+                           else persp * drop * (1 - f))
     return [
         (xA, int(top_y(xA) * crop_h)),
         (xB, int(top_y(xB) * crop_h)),
@@ -251,80 +304,154 @@ def make_poly(crop_w, crop_h, xA, xB, top_base, bot_base, persp, tilt_dir):
     ]
 
 
+# =========================
+# CONSTRUIRE LES ZONES
+# =========================
 def build_zones(crop_w, crop_h, angle, rear_side, front_side, facing, lights):
     rl, rr = lights["red_left"],   lights["red_right"]
     wl, wr = lights["white_left"], lights["white_right"]
+
     if facing == "rear":
         near_side = "left" if rl > rr else "right"
     elif facing == "front":
         near_side = "left" if wl > wr else "right"
     else:
         near_side = "left" if (rl+wl) > (rr+wr) else "right"
+
     far_side = "right" if near_side == "left" else "left"
-    if angle <= 10:   persp = 0.0
-    elif angle <= 55: persp = 0.6 * min(1.0, (angle - 10) / 45.0)
-    elif angle <= 80: persp = 0.6 * max(0.0, 1.0 - (angle - 55) / 25.0)
-    else:             persp = 0.0
+
+    if angle <= 10:
+        persp = 0.0
+    elif angle <= 55:
+        persp = 0.6 * min(1.0, (angle - 10) / 45.0)
+    elif angle <= 80:
+        persp = 0.6 * max(0.0, 1.0 - (angle - 55) / 25.0)
+    else:
+        persp = 0.0
+
     tilt_dir = +1 if far_side == "right" else -1
     top_base = 0.20
     bot_base = 0.88
-    is_rear  = (facing == "rear") or (facing == "side" and (rl + rr) >= (wl + wr))
+
+    is_rear  = (facing == "rear") or (
+        facing == "side" and (rl + rr) >= (wl + wr)
+    )
     panel    = "Coffre"     if is_rear else "Capot"
     pc_label = "Pare-ch.AR" if is_rear else "Pare-ch.AV"
 
     def zone(name, a, b):
-        return {"name": name,
-                "poly": make_poly(crop_w, crop_h, int(a * crop_w), int(b * crop_w),
-                                  top_base, bot_base, persp, tilt_dir)}
+        return {
+            "name": name,
+            "poly": make_poly(
+                crop_w, crop_h,
+                int(a * crop_w), int(b * crop_w),
+                top_base, bot_base, persp, tilt_dir
+            )
+        }
+
     log_label = ""
+
+    # 0-25° : PROFIL
     if angle <= 25:
         log_label = f"PROFIL (angle={angle}°) near={near_side} {'AR' if is_rear else 'AV'}"
         if near_side == "right":
             if is_rear:
-                return [zone("Aile AV",0.00,0.20),zone("Porte AV",0.20,0.48),
-                        zone("Porte AR",0.48,0.78),zone("Aile AR",0.78,1.00)], log_label
+                return [
+                    zone("Aile AV",  0.00, 0.20),
+                    zone("Porte AV", 0.20, 0.48),
+                    zone("Porte AR", 0.48, 0.78),
+                    zone("Aile AR",  0.78, 1.00),
+                ], log_label
             else:
-                return [zone("Aile AR",0.00,0.20),zone("Porte AR",0.20,0.48),
-                        zone("Porte AV",0.48,0.78),zone("Aile AV",0.78,1.00)], log_label
+                return [
+                    zone("Aile AR",  0.00, 0.20),
+                    zone("Porte AR", 0.20, 0.48),
+                    zone("Porte AV", 0.48, 0.78),
+                    zone("Aile AV",  0.78, 1.00),
+                ], log_label
         else:
             if is_rear:
-                return [zone("Aile AR",0.00,0.22),zone("Porte AR",0.22,0.52),
-                        zone("Porte AV",0.52,0.80),zone("Aile AV",0.80,1.00)], log_label
+                return [
+                    zone("Aile AR",  0.00, 0.22),
+                    zone("Porte AR", 0.22, 0.52),
+                    zone("Porte AV", 0.52, 0.80),
+                    zone("Aile AV",  0.80, 1.00),
+                ], log_label
             else:
-                return [zone("Aile AV",0.00,0.22),zone("Porte AV",0.22,0.52),
-                        zone("Porte AR",0.52,0.80),zone("Aile AR",0.80,1.00)], log_label
+                return [
+                    zone("Aile AV",  0.00, 0.22),
+                    zone("Porte AV", 0.22, 0.52),
+                    zone("Porte AR", 0.52, 0.80),
+                    zone("Aile AR",  0.80, 1.00),
+                ], log_label
+
+    # 25-55° : 3/4 LEGER
     elif angle <= 55:
         log_label = f"3/4 LEGER (angle={angle}°) near={near_side} {'AR' if is_rear else 'AV'}"
         if near_side == "right":
             if is_rear:
-                return [zone("Porte AV",0.00,0.22),zone("Porte AR",0.22,0.50),
-                        zone("Aile AR",0.50,0.72),zone(pc_label,0.72,1.00)], log_label
+                return [
+                    zone("Porte AV", 0.00, 0.22),
+                    zone("Porte AR", 0.22, 0.50),
+                    zone("Aile AR",  0.50, 0.72),
+                    zone(pc_label,   0.72, 1.00),
+                ], log_label
             else:
-                return [zone("Porte AR",0.00,0.22),zone("Porte AV",0.22,0.50),
-                        zone("Aile AV",0.50,0.72),zone(pc_label,0.72,1.00)], log_label
+                return [
+                    zone("Porte AR", 0.00, 0.22),
+                    zone("Porte AV", 0.22, 0.50),
+                    zone("Aile AV",  0.50, 0.72),
+                    zone(pc_label,   0.72, 1.00),
+                ], log_label
         else:
             if is_rear:
-                return [zone(pc_label,0.00,0.28),zone("Aile AR",0.28,0.50),
-                        zone("Porte AR",0.50,0.78),zone("Porte AV",0.78,1.00)], log_label
+                return [
+                    zone(pc_label,   0.00, 0.28),
+                    zone("Aile AR",  0.28, 0.50),
+                    zone("Porte AR", 0.50, 0.78),
+                    zone("Porte AV", 0.78, 1.00),
+                ], log_label
             else:
-                return [zone(pc_label,0.00,0.28),zone("Aile AV",0.28,0.50),
-                        zone("Porte AV",0.50,0.78),zone("Porte AR",0.78,1.00)], log_label
+                return [
+                    zone(pc_label,   0.00, 0.28),
+                    zone("Aile AV",  0.28, 0.50),
+                    zone("Porte AV", 0.50, 0.78),
+                    zone("Porte AR", 0.78, 1.00),
+                ], log_label
+
+    # 55-80° : 3/4 MARQUE
     elif angle <= 80:
         log_label = f"3/4 MARQUE (angle={angle}°) near={near_side} {'AR' if is_rear else 'AV'}"
         if near_side == "right":
-            return [zone("Aile AR" if is_rear else "Aile AV",0.42,0.68),
-                    zone(panel,0.68,0.85),zone(pc_label,0.85,1.00)], log_label
+            return [
+                zone("Aile AR" if is_rear else "Aile AV", 0.42, 0.68),
+                zone(panel,                               0.68, 0.85),
+                zone(pc_label,                            0.85, 1.00),
+            ], log_label
         else:
-            return [zone(pc_label,0.00,0.15),zone(panel,0.15,0.32),
-                    zone("Aile AR" if is_rear else "Aile AV",0.32,0.58)], log_label
+            return [
+                zone(pc_label,                            0.00, 0.15),
+                zone(panel,                               0.15, 0.32),
+                zone("Aile AR" if is_rear else "Aile AV", 0.32, 0.58),
+            ], log_label
+
+    # 80-90° : FACE / DOS
     else:
         log_label = f"FACE/DOS (angle={angle}°) {'AR' if is_rear else 'AV'}"
         if is_rear:
-            return [zone("Aile AR G",0.00,0.20),zone(pc_label,0.20,0.55),
-                    zone(panel,0.45,0.80),zone("Aile AR D",0.80,1.00)], log_label
+            return [
+                zone("Aile AR G", 0.00, 0.20),
+                zone(pc_label,    0.20, 0.55),
+                zone(panel,       0.45, 0.80),
+                zone("Aile AR D", 0.80, 1.00),
+            ], log_label
         else:
-            return [zone("Aile AV G",0.00,0.20),zone(pc_label,0.20,0.55),
-                    zone(panel,0.45,0.80),zone("Aile AV D",0.80,1.00)], log_label
+            return [
+                zone("Aile AV G", 0.00, 0.20),
+                zone(pc_label,    0.20, 0.55),
+                zone(panel,       0.45, 0.80),
+                zone("Aile AV D", 0.80, 1.00),
+            ], log_label
 
 
 # =========================
@@ -356,7 +483,9 @@ def analyse():
         if not cars:
             return jsonify({"error": "Car not detected"}), 400
 
+        # ===== MARQUE / MODELE =====
         car_info = call_car_make_model(resized_path)
+        # Si YOLO renvoie deja make/model, on les utilise
         if yolo_result.get("make"):
             car_info["make"]  = yolo_result.get("make", car_info["make"])
         if yolo_result.get("model"):
@@ -412,8 +541,6 @@ def analyse():
             float(np.median(all_valid[:, 1])),
             float(np.median(all_valid[:, 2]))
         ])
-        ref_S = float(ref_color[1])
-        ref_V = float(ref_color[2])
 
         final_img  = img_orig.copy()
         thick_box  = max(3, int(4 * min(scale_x, scale_y)))
@@ -424,6 +551,7 @@ def analyse():
 
         cv2.rectangle(final_img, (x1, y1), (x2, y2), (220, 220, 220), thick_line)
 
+        # En-tete avec marque/modele + orientation
         header = f"{car_info['make']} {car_info['model']} | {'AR' if facing=='rear' else ('AV' if facing=='front' else 'COTE')} | {angle}°"
         (hw, hh), _ = cv2.getTextSize(header, cv2.FONT_HERSHEY_SIMPLEX, font_med * 1.2, font_thick)
         cv2.rectangle(final_img, (5, 5), (15 + hw, 20 + hh), (0, 0, 0), -1)
@@ -445,66 +573,71 @@ def analyse():
             if zone_color is None:
                 color_rect, label_score, diff, verdict = (150,150,150), "N/A", 0.0, "Non analysable"
                 std_h = std_s = std_v = 0.0
-                diff_v_med = 0.0
             else:
+                # ecart de TEINTE (H) seulement -> plus fiable que la norme HSV
                 diff_h = abs(float(zone_color[0]) - float(ref_color[0]))
-                diff_h = min(diff_h, 180.0 - diff_h)
+                diff_h = min(diff_h, 180.0 - diff_h)  # H est circulaire
                 diff   = diff_h
                 std_h  = stats["std_h"]
                 std_s  = stats["std_s"]
                 std_v  = stats["std_v"]
+
+                # =====================================================
+                # VERDICT ADAPTATIF SELON LE TYPE DE PEINTURE
+                #
+                # Probleme observe :
+                # - Voiture noire/blanche : la teinte H est INSTABLE
+                #   (saturation trop faible) -> H=78 ne veut rien dire.
+                #   En plus les reflets gonflent std_s et std_v.
+                # - Voiture coloree (vert, rouge, bleu...) : H est tres
+                #   fiable, c'est le signal principal.
+                #
+                # Regle :
+                #  * Si zone ET reference ont S >= 30 -> mode COULEUR
+                #      (H fiable, on regarde diff_H + appui std_s)
+                #  * Sinon -> mode MONOCHROME
+                #      (H ignore, on compare la LUMINOSITE V mediane)
+                # =====================================================
                 zone_S = float(zone_color[1])
                 zone_V = float(zone_color[2])
-                diff_v_med = abs(zone_V - ref_V)
-                diff_s_med = abs(zone_S - ref_S)
+                ref_S  = float(ref_color[1])
+                ref_V  = float(ref_color[2])
 
-                # =====================================================
-                # VERDICT V10 - LA LUMINOSITE (V) EST LE SIGNAL PRINCIPAL
-                #
-                # Insight utilisateur :
-                # "les peintures repeintes sont generalement soit plus
-                #  claires soit plus foncees que le reste"
-                # => diff_V_median est le signal le plus fiable.
-                #
-                # H secondaire (utile pour voitures colorees).
-                # std_s secondaire (chimie peinture).
-                #
-                # Mode COULEUR  : ref/zone S >= 35  -> H + dV
-                # Mode MONOCHROME (noir/blanc/gris) -> dV seul,
-                #   seuils ELEVES pour eviter faux positifs sur voiture
-                #   neuve homogene (Clio noire).
-                # =====================================================
-                h_reliable = (zone_S >= 35.0) and (ref_S >= 35.0)
+                diff_v_med = abs(zone_V - ref_V)
+                h_reliable = (zone_S >= 30.0) and (ref_S >= 30.0)
 
                 if h_reliable:
-                    # ----- MODE COULEUR -----
-                    # Score combine pondere : dV pese le plus
-                    score = diff_v_med * 1.0 + diff * 0.8 + max(0.0, diff_s_med - 5.0) * 0.5
-
-                    if   40 >score > 22:
+                    # ----- MODE COULEUR : H fiable -----
+                    # diff H seul suffit s'il est tres marque (>=15)
+                    # sinon on demande confirmation par std_s eleve
+                    if   diff >= 15.0:
                         verdict_state = "refaite"
-                
-                    elif 23>=score >= 7.0:
+                    elif diff >= 7.0 and std_s <= 10.0:
+                        verdict_state = "refaite"
+                    elif diff >= 7.0:
+                        verdict_state = "suspecte"
+                    elif diff >= 5.0 and std_s >= 18.0 and std_v >= 35.0:
                         verdict_state = "suspecte"
                     else:
                         verdict_state = "ok"
-                    mode_tag = "C"
-                    combo_score = score
+                    mode_tag = "C"  # Color
+                    combo_score = diff * 2.0 + max(0.0, std_s - 8.0) * 0.6
                 else:
-                    # ----- MODE MONOCHROME (noir/blanc) -----
-                    # Seuils stricts : la Clio noire neuve doit rester OK.
-                    # Reflets/vitres font varier V naturellement de ~15-25.
-                    score = diff_v_med
-                    if   diff_v_med >= 55.0 and diff_s_med >= 15.0:
+                    # ----- MODE MONOCHROME : H ignore -----
+                    # On compare la LUMINOSITE mediane V de la zone
+                    # avec celle de la voiture. Repeinture mate/brillante
+                    # se traduit par une zone plus sombre OU plus claire.
+                    # Tolerance large car reflets/vitres tirent V.
+                    if   diff_v_med >= 45.0 and std_s >= 25.0:
                         verdict_state = "refaite"
-                    elif diff_v_med >= 70.0:
+                    elif diff_v_med >= 60.0:
                         verdict_state = "refaite"
-                    elif diff_v_med >= 40.0 and diff_s_med >= 20.0:
+                    elif diff_v_med >= 30.0 and std_s >= 35.0:
                         verdict_state = "suspecte"
                     else:
                         verdict_state = "ok"
-                    mode_tag = "M"
-                    combo_score = score
+                    mode_tag = "M"  # Monochrome
+                    combo_score = diff_v_med * 1.2
 
                 if   verdict_state == "refaite":
                     color_rect, verdict = (0, 0, 255),   "Peinture refaite!";  detected += 1
@@ -513,11 +646,9 @@ def analyse():
                 else:
                     color_rect, verdict = (0, 210, 0),   "OK"
 
-                # AFFICHAGE : DIFF EN PREMIER (visible sur image)
                 label_score = (
-                    f"D{int(round(diff_v_med + diff))}"
-                    f"/H{int(diff)}/dV{int(diff_v_med)}"
-                    f"/{mode_tag}{int(combo_score)}"
+                    f"H{int(diff)}/S{int(std_s)}/V{int(std_v)}"
+                    f"/dV{int(diff_v_med)}/{mode_tag}{int(combo_score)}"
                 )
 
             overlay = final_img.copy()
@@ -540,7 +671,7 @@ def analyse():
             top_pt = poly_global[poly_global[:, 1].argmin()]
             lbl_x  = max(5, int(top_pt[0]))
             lbl_y  = max(20, int(top_pt[1]) - 10)
-            label_full = f"{idx}. {zone['name']}  {label_score}"
+            label_full = f"{idx}. {zone['name']}  E:{label_score}"
             (lw, lh), _ = cv2.getTextSize(label_full, cv2.FONT_HERSHEY_SIMPLEX, font_med, font_thick)
             lbl_x = min(lbl_x, orig_w - lw - 10)
             cv2.rectangle(final_img, (lbl_x - 4, lbl_y - lh - 6),
@@ -550,15 +681,13 @@ def analyse():
                         (255, 255, 255), font_thick)
 
             results_zones.append({
-                "idx": idx, "zone": zone["name"],
-                "diff": round(diff, 1),
-                "diff_v": round(diff_v_med, 1),
+                "idx": idx, "zone": zone["name"], "diff": round(diff, 1),
                 "std_h": round(std_h, 2), "std_s": round(std_s, 2), "std_v": round(std_v, 2),
                 "pixels": px_count, "verdict": verdict,
                 "polygon": poly_global.tolist()
             })
 
-        diffs = [z["diff"] + z["diff_v"] for z in results_zones if (z["diff"] + z["diff_v"]) > 0]
+        diffs       = [z["diff"] for z in results_zones if z["diff"] > 0]
         final_score = min(int(np.mean(diffs)) if diffs else 0, 100)
         if   final_score < 10: result = "Peinture homogene (OK)"
         elif final_score < 28: result = "Legeres variations detectees"
