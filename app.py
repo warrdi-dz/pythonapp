@@ -442,7 +442,7 @@ def analyse():
                 # imposees par l'utilisateur sur 5 photos reelles)
                 # =====================================================
                 if h_reliable:
-                    # ----- MODE COULEUR : H fiable -----
+                    # ----- MODE COULEUR : H fiable ----
                     # Photo 1 Aile AV H=28  -> RED
                     # Photo 5 Aile AR H=5   -> OK
                     # Photo 5 Porte AV H=6  -> OK
