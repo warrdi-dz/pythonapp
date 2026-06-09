@@ -481,7 +481,7 @@ def analyse():
                     # Score combine pondere : dV pese le plus
                     score = diff_v_med * 1.0 + diff * 0.8 + max(0.0, diff_s_med - 5.0) * 0.5
 
-                    if   40 >score > 25:
+                    if   40 >score > 23:
                         verdict_state = "refaite"
                 
                     elif 23>=score >= 7.0:
