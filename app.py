@@ -484,7 +484,7 @@ def analyse():
                     if   25>=score >= 18.0:
                         verdict_state = "refaite"
                 
-                    elif 4>=score >= 7.0:
+                    elif 24>=score >= 7.0:
                         verdict_state = "suspecte"
                     else:
                         verdict_state = "ok"
