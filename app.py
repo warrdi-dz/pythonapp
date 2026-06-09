@@ -481,10 +481,9 @@ def analyse():
                     # Score combine pondere : dV pese le plus
                     score = diff_v_med * 1.0 + diff * 0.8 + max(0.0, diff_s_med - 5.0) * 0.5
 
-                    if   score >= 18.0:
+                    if   29>=score >= 18.0:
                         verdict_state = "refaite"
-                    elif score >= 11.0:
-                        verdict_state = "refaite"
+                
                     elif score >= 7.0:
                         verdict_state = "suspecte"
                     else:
