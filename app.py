@@ -16,7 +16,7 @@ YOLO_W = 900
 YOLO_H = 500
 
 # =========================
-# YOLO API CALL  (detection + marque/modele si dispo)
+# YOLO API CALL
 # =========================
 def call_yolo(image_path):
     url = "https://warrdi.com/pytho/detect"
@@ -26,38 +26,12 @@ def call_yolo(image_path):
         with open(image_path, "rb") as f:
             files   = {"image": (os.path.basename(image_path), f, mime)}
             headers = {"Accept": "application/json"}
-            r = requests.post(url, files=files, headers=headers, timeout=25)
+            r = requests.post(url, files=files, headers=headers, timeout=20)
         if r.status_code == 200:
             return r.json()
         return {"error": "YOLO failed", "status": r.status_code}
     except Exception as e:
         return {"error": "YOLO exception", "details": str(e)}
-
-
-def call_car_make_model(image_path):
-    """
-    Tentative d'appel a un endpoint dedie marque/modele.
-    Si l'endpoint n'existe pas, on retourne Unknown sans bloquer.
-    L'endpoint attendu doit renvoyer {"make": "...", "model": "...", "confidence": 0.x}
-    """
-    url = "https://warrdi.com/pytho/car_make_model"
-    try:
-        ext  = os.path.splitext(image_path)[1].lower()
-        mime = "image/jpeg" if ext in (".jpg", ".jpeg") else "image/png"
-        with open(image_path, "rb") as f:
-            files = {"image": (os.path.basename(image_path), f, mime)}
-            r = requests.post(url, files=files, timeout=15)
-        if r.status_code == 200:
-            data = r.json()
-            return {
-                "make":       data.get("make",  "Unknown"),
-                "model":      data.get("model", "Unknown"),
-                "confidence": data.get("confidence", 0.0)
-            }
-    except Exception:
-        pass
-    return {"make": "Unknown", "model": "Unknown", "confidence": 0.0}
-
 
 @app.route("/uploads/<filename>")
 def uploads(filename):
@@ -65,31 +39,93 @@ def uploads(filename):
 
 @app.route("/")
 def home():
-    return jsonify({"status": "OK", "message": "GARAGE PRO V7"})
+    return jsonify({"status": "OK", "message": "GARAGE PRO V6"})
 
 
-# =========================
-# COULEUR HSV MEDIANE dans un POLYGONE
-# =========================
-def get_poly_color(hsv_img, body_mask, polygon):
-    h, w = hsv_img.shape[:2]
+# =============================================
+# COULEUR LAB MÉDIANE dans un POLYGONE
+# Utilise LAB pour une meilleure précision
+# Exclut les 10% extrêmes (reflets et ombres)
+# =============================================
+def get_poly_color_lab(lab_img, body_mask, polygon):
+    h, w = lab_img.shape[:2]
     poly_mask = np.zeros((h, w), dtype=np.uint8)
     cv2.fillPoly(poly_mask, [np.array(polygon, dtype=np.int32)], 255)
-    combined = cv2.bitwise_and(poly_mask, body_mask)
-    valid = hsv_img[combined > 0]
+    combined  = cv2.bitwise_and(poly_mask, body_mask)
+    valid     = lab_img[combined > 0]
     if len(valid) < 80:
-        return None, 0, None
-    med = np.array([
+        return None, 0
+    # Exclure 10% extrêmes de luminosité
+    L    = valid[:, 0]
+    p10  = np.percentile(L, 10)
+    p90  = np.percentile(L, 90)
+    keep = (L >= p10) & (L <= p90)
+    valid = valid[keep]
+    if len(valid) < 50:
+        return None, 0
+    return np.array([
         float(np.median(valid[:, 0])),
         float(np.median(valid[:, 1])),
         float(np.median(valid[:, 2]))
-    ])
-    stats = {
-        "std_h": float(np.std(valid[:, 0])),
-        "std_s": float(np.std(valid[:, 1])),
-        "std_v": float(np.std(valid[:, 2])),
-    }
-    return med, len(valid), stats
+    ]), len(valid)
+
+
+# =============================================
+# MASQUE CARROSSERIE ANTI-OMBRES / REFLETS
+# =============================================
+def build_body_mask(car_crop, hsv):
+    # Trop sombre = vitres, pneus, taches noires
+    mask_dark = cv2.inRange(hsv, (0, 0,   0), (180, 255,  45))
+    # Reflets blancs très forts
+    mask_refl = cv2.inRange(hsv, (0, 0, 218), (180, 255, 255))
+    # Ciel
+    mask_sky  = cv2.inRange(hsv, (0, 0, 210), (180,  20, 255))
+    # Chrome / plastique
+    mask_chro = cv2.inRange(hsv, (0, 0,   0), (180,  28, 255))
+
+    exclude   = cv2.bitwise_or(mask_dark, mask_refl)
+    exclude   = cv2.bitwise_or(exclude,   mask_sky)
+    exclude   = cv2.bitwise_or(exclude,   mask_chro)
+    mask_body = cv2.bitwise_not(exclude)
+
+    k         = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+    mask_body = cv2.morphologyEx(mask_body, cv2.MORPH_CLOSE, k, iterations=2)
+    mask_body = cv2.morphologyEx(mask_body, cv2.MORPH_OPEN,  k, iterations=1)
+
+    h_c, w_c = car_crop.shape[:2]
+
+    # Supprimer ombres par forme
+    mask_semi           = cv2.inRange(hsv, (0, 0, 35), (180, 255, 130))
+    mask_shadow_on_body = cv2.bitwise_and(mask_semi, mask_body)
+    ks                  = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+    mask_shadow_on_body = cv2.morphologyEx(
+        mask_shadow_on_body, cv2.MORPH_CLOSE, ks, iterations=3
+    )
+
+    contours, _ = cv2.findContours(
+        mask_shadow_on_body, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+    )
+    mask_rm         = np.zeros_like(mask_body)
+    total_body_area = max(cv2.countNonZero(mask_body), 1)
+
+    for cnt in contours:
+        area = cv2.contourArea(cnt)
+        if area < 200:
+            continue
+        x, y, w, h = cv2.boundingRect(cnt)
+        ratio_hw   = h / max(w, 1)
+        ratio_wh   = w / max(h, 1)
+        area_ratio = area / total_body_area
+        is_pole    = (ratio_hw > 3.0) and (w < w_c * 0.12)
+        is_long    = (ratio_wh > 4.0) and (area_ratio > 0.04)
+        touch_bot  = (y + h) > (h_c * 0.88)
+        is_round   = (area_ratio < 0.07) and (ratio_hw < 1.6) and (ratio_wh < 1.6)
+        if is_pole or is_long or touch_bot or is_round:
+            cv2.drawContours(mask_rm, [cnt], -1, 255, -1)
+
+    mask_body = cv2.bitwise_and(mask_body, cv2.bitwise_not(mask_rm))
+    mask_body = cv2.morphologyEx(mask_body, cv2.MORPH_CLOSE, k, iterations=1)
+    return mask_body
 
 
 # =========================
@@ -115,7 +151,7 @@ def refine_car_bbox(img, x1, y1, x2, y2):
     valid_rows = np.where(row_sum > row_thresh)[0]
     if len(valid_cols) < 20 or len(valid_rows) < 20:
         return x1, y1, x2, y2
-    PAD = 8
+    PAD    = 8
     new_x1 = max(0,            x1 + int(valid_cols[0])  - PAD)
     new_x2 = min(img.shape[1], x1 + int(valid_cols[-1]) + PAD)
     new_y1 = max(0,            y1 + int(valid_rows[0])  - PAD)
@@ -127,21 +163,12 @@ def refine_car_bbox(img, x1, y1, x2, y2):
 
 # =========================
 # DETECTION FEUX
-#
-# CORRECTION CRITIQUE :
-# - Bande verticale resserree (40%-80% au lieu de 30%-92%) pour
-#   exclure le mur/le ciel/le toit
-# - Plage ROUGE elargie en saturation (les feux LED sont satures meme
-#   eteints, le rouge sature est tres rare dans une scene exterieure)
-# - Plage BLANC/JAUNE plus stricte (S maxi reduit, V mini eleve)
-#   pour ne pas confondre un mur beige avec un phare
 # =========================
 def detect_lights(car_crop):
-    h, w = car_crop.shape[:2]
+    h, w    = car_crop.shape[:2]
     band_w  = int(w * 0.28)
-    # Bande resserree autour de la hauteur des feux uniquement
-    feux_y1 = int(h * 0.40)
-    feux_y2 = int(h * 0.78)
+    feux_y1 = int(h * 0.30)
+    feux_y2 = int(h * 0.92)
 
     left_feux  = car_crop[feux_y1:feux_y2, 0:band_w]
     right_feux = car_crop[feux_y1:feux_y2, w - band_w:w]
@@ -149,138 +176,114 @@ def detect_lights(car_crop):
     right_hsv  = cv2.cvtColor(right_feux, cv2.COLOR_BGR2HSV)
 
     def count_red(hsv):
-        # Rouge sature uniquement (S>=90, V>=70) — les murs beiges sont S<60
-        m1 = cv2.inRange(hsv, (0,   90, 70),  (12,  255, 255))
-        m2 = cv2.inRange(hsv, (165, 90, 70),  (180, 255, 255))
+        m1 = cv2.inRange(hsv, (0,   60, 60), (12,  255, 255))
+        m2 = cv2.inRange(hsv, (168, 60, 60), (180, 255, 255))
         return int(cv2.countNonZero(cv2.bitwise_or(m1, m2)))
 
     def count_white(hsv):
-        # Blanc TRES brillant uniquement (V>=210, S<=60) — exclut murs beiges
-        white = cv2.inRange(hsv, (0, 0, 210), (180, 60, 255))
-        # Jaune des clignotants : sature ET brillant
-        yellow = cv2.inRange(hsv, (18, 130, 190), (35, 255, 255))
+        white  = cv2.inRange(hsv, (0,  0,  170), (180, 90,  255))
+        yellow = cv2.inRange(hsv, (15, 40, 170), (40,  220, 255))
         return int(cv2.countNonZero(cv2.bitwise_or(white, yellow)))
 
-    rl = count_red(left_hsv)
-    rr = count_red(right_hsv)
-    wl = count_white(left_hsv)
-    wr = count_white(right_hsv)
-    band_area = band_w * (feux_y2 - feux_y1)
+    rl = count_red(left_hsv);   rr = count_red(right_hsv)
+    wl = count_white(left_hsv); wr = count_white(right_hsv)
+    ba = band_w * (feux_y2 - feux_y1)
 
     return {
-        "red_left":    rl,
-        "red_right":   rr,
-        "white_left":  wl,
-        "white_right": wr,
-        "red_tot":     rl + rr,
-        "white_tot":   wl + wr,
-        "band_area":   band_area,
-        "red_left_ratio":  rl / max(band_area, 1),
-        "red_right_ratio": rr / max(band_area, 1),
-        "whi_left_ratio":  wl / max(band_area, 1),
-        "whi_right_ratio": wr / max(band_area, 1),
+        "red_left": rl, "red_right": rr,
+        "white_left": wl, "white_right": wr,
+        "red_tot": rl+rr, "white_tot": wl+wr,
+        "band_area": ba,
+        "red_left_ratio":  rl/max(ba,1),
+        "red_right_ratio": rr/max(ba,1),
+        "whi_left_ratio":  wl/max(ba,1),
+        "whi_right_ratio": wr/max(ba,1),
     }
 
 
 # =========================
 # DETECTION AVANT/ARRIERE
-#
-# PRIORITE AU ROUGE :
-# Le rouge sature est rare dans une scene exterieure. S'il est
-# present en quantite significative, c'est forcement un feu arriere.
-# Le "blanc" peut etre un mur, un trottoir, du ciel, etc.
 # =========================
 def detect_front_rear(lights):
     log = []
     rl, rr = lights["red_left"],   lights["red_right"]
     wl, wr = lights["white_left"], lights["white_right"]
-    red_tot   = rl + rr
-    white_tot = wl + wr
-    band_area = lights["band_area"]
+    red_tot = rl + rr; white_tot = wl + wr
 
-    # Seuil minimal pour qu'un feu rouge soit considere "present"
-    red_thr   = max(120, int(band_area * 0.003))
-    white_thr = max(400, int(band_area * 0.020))   # exigence plus forte
+    rear_side  = "left"  if rl > rr*1.25 else ("right" if rr > rl*1.25 else None)
+    front_side = "left"  if wl > wr*1.25 else ("right" if wr > wl*1.25 else None)
 
-    # ----- PRIORITE 1 : rouge significatif = arriere -----
-    if red_tot >= red_thr:
-        facing = "rear"
-        log.append(f"facing=REAR (rouge significatif tot={red_tot} >= seuil {red_thr})")
-    # ----- PRIORITE 2 : blanc tres dominant = avant -----
-    elif white_tot >= white_thr and white_tot > red_tot * 3:
-        facing = "front"
-        log.append(f"facing=FRONT (blanc dominant tot={white_tot})")
-    else:
-        facing = "side"
-        log.append(f"facing=SIDE (red={red_tot} white={white_tot})")
+    if   red_tot > white_tot*1.4 and red_tot > 150:   facing = "rear"
+    elif white_tot > red_tot*1.4 and white_tot > 150: facing = "front"
+    else:                                               facing = "side"
 
-    # Cote du feu rouge dominant
-    if rl > rr * 1.25:
-        rear_side = "left"
-    elif rr > rl * 1.25:
-        rear_side = "right"
-    else:
-        rear_side = None
-
-    # Cote des phares dominants
-    if wl > wr * 1.25:
-        front_side = "left"
-    elif wr > wl * 1.25:
-        front_side = "right"
-    else:
-        front_side = None
-
-    # Reconciliation
-    if rear_side and not front_side:
-        front_side = "right" if rear_side == "left" else "left"
+    if rear_side  and not front_side:
+        front_side = "right" if rear_side  == "left" else "left"
     if front_side and not rear_side:
-        rear_side = "right" if front_side == "left" else "left"
+        rear_side  = "right" if front_side == "left" else "left"
     if not rear_side and not front_side:
         rear_side, front_side = "right", "left"
-        log.append("Fallback: arriere=droite")
+        log.append("Fallback arriere=droite")
 
     log.append(f"rouge G={rl} D={rr} | blanc G={wl} D={wr}")
-    log.append(f"rear_side={rear_side} front_side={front_side}")
+    log.append(f"facing={facing} rear={rear_side} front={front_side}")
     return rear_side, front_side, facing, log
 
 
 # =========================
-# ESTIMER L'ANGLE DE VUE
+# ESTIMER L'ANGLE
 # =========================
 def estimate_angle(lights, crop_w, crop_h, facing):
     rl, rr = lights["red_left"],   lights["red_right"]
     wl, wr = lights["white_left"], lights["white_right"]
 
-    if facing == "rear":
-        big = max(rl, rr); sml = min(rl, rr)
-    elif facing == "front":
-        big = max(wl, wr); sml = min(wl, wr)
+    if   facing == "rear":  big = max(rl,rr); sml = min(rl,rr)
+    elif facing == "front": big = max(wl,wr); sml = min(wl,wr)
     else:
-        big = max(rl + wl, rr + wr); sml = min(rl + wl, rr + wr)
+        big = max(rl+wl, rr+wr); sml = min(rl+wl, rr+wr)
 
     if big == 0:
         return 45.0
 
-    sym_ratio = big / max(sml, 1)
+    sym = big / max(sml, 1)
 
-    if sym_ratio >= 8.0:
-        angle = 10.0
-    elif sym_ratio >= 4.0:
-        angle = 10.0 + (8.0 - sym_ratio) / 4.0 * 30.0
-    elif sym_ratio >= 2.0:
-        angle = 40.0 + (4.0 - sym_ratio) / 2.0 * 25.0
-    elif sym_ratio >= 1.3:
-        angle = 65.0 + (2.0 - sym_ratio) / 0.7 * 20.0
-    else:
-        angle = 87.0
+    if   sym >= 8.0: angle = 10.0
+    elif sym >= 4.0: angle = 10.0 + (8.0-sym)/4.0 * 30.0
+    elif sym >= 2.0: angle = 40.0 + (4.0-sym)/2.0 * 25.0
+    elif sym >= 1.3: angle = 65.0 + (2.0-sym)/0.7 * 20.0
+    else:            angle = 87.0
 
     ratio_wh = crop_w / max(crop_h, 1)
-    if ratio_wh > 1.6:
-        angle = min(angle, 35.0)
-    elif ratio_wh < 0.9:
-        angle = max(angle, 60.0)
+    if ratio_wh > 1.6: angle = min(angle, 35.0)
+    elif ratio_wh < 0.9: angle = max(angle, 60.0)
 
     return round(angle, 1)
+
+
+# =============================================
+# SCORE NORMALISÉ LAB
+# Utilise les canaux a,b (teinte pure) normalisés
+# par la variabilité naturelle de la carrosserie.
+# Retourne un score 0-∞ où :
+#   < 1.0  → OK
+#   1.0-2.0 → Variation suspecte
+#   > 2.0  → Peinture refaite
+#
+# CLEF : on compare la teinte (a,b) pas la luminosité (L)
+# pour éviter les faux positifs dus à l'éclairage
+# =============================================
+def compute_score(zone_color, ref_color, nat_std_a, nat_std_b,
+                   zone_tex, ref_tex):
+    # Delta teinte normalisé
+    da         = abs(zone_color[1] - ref_color[1]) / nat_std_a
+    db         = abs(zone_color[2] - ref_color[2]) / nat_std_b
+    color_diff = float(np.sqrt(da**2 + db**2))
+
+    # Delta texture normalisé
+    tex_diff   = min(abs(zone_tex - ref_tex) / max(ref_tex, 1), 2.0)
+
+    # Score final : 85% couleur + 15% texture
+    return round((color_diff * 0.85) + (tex_diff * 0.15), 2)
 
 
 # =========================
@@ -288,170 +291,102 @@ def estimate_angle(lights, crop_w, crop_h, facing):
 # =========================
 def make_poly(crop_w, crop_h, xA, xB, top_base, bot_base, persp, tilt_dir):
     drop = 0.08
+
     def top_y(x):
         f = x / max(1, crop_w)
-        return top_base + (persp * drop * f if tilt_dir > 0
-                           else persp * drop * (1 - f))
+        return top_base + (persp*drop*f if tilt_dir>0 else persp*drop*(1-f))
+
     def bot_y(x):
         f = x / max(1, crop_w)
-        return bot_base - (persp * drop * f if tilt_dir > 0
-                           else persp * drop * (1 - f))
+        return bot_base - (persp*drop*f if tilt_dir>0 else persp*drop*(1-f))
+
     return [
-        (xA, int(top_y(xA) * crop_h)),
-        (xB, int(top_y(xB) * crop_h)),
-        (xB, int(bot_y(xB) * crop_h)),
-        (xA, int(bot_y(xA) * crop_h)),
+        (xA, int(top_y(xA)*crop_h)),
+        (xB, int(top_y(xB)*crop_h)),
+        (xB, int(bot_y(xB)*crop_h)),
+        (xA, int(bot_y(xA)*crop_h)),
     ]
 
 
 # =========================
-# CONSTRUIRE LES ZONES
+# BUILD ZONES SELON ANGLE
 # =========================
 def build_zones(crop_w, crop_h, angle, rear_side, front_side, facing, lights):
     rl, rr = lights["red_left"],   lights["red_right"]
     wl, wr = lights["white_left"], lights["white_right"]
 
-    if facing == "rear":
-        near_side = "left" if rl > rr else "right"
-    elif facing == "front":
-        near_side = "left" if wl > wr else "right"
-    else:
-        near_side = "left" if (rl+wl) > (rr+wr) else "right"
+    if   facing == "rear":  near_side = "left" if rl>rr else "right"
+    elif facing == "front": near_side = "left" if wl>wr else "right"
+    else:                   near_side = "left" if (rl+wl)>(rr+wr) else "right"
 
-    far_side = "right" if near_side == "left" else "left"
+    far_side = "right" if near_side=="left" else "left"
 
-    if angle <= 10:
-        persp = 0.0
-    elif angle <= 55:
-        persp = 0.6 * min(1.0, (angle - 10) / 45.0)
-    elif angle <= 80:
-        persp = 0.6 * max(0.0, 1.0 - (angle - 55) / 25.0)
-    else:
-        persp = 0.0
+    if   angle <= 10: persp = 0.0
+    elif angle <= 55: persp = 0.6 * min(1.0, (angle-10)/45.0)
+    elif angle <= 80: persp = 0.6 * max(0.0, 1.0-(angle-55)/25.0)
+    else:             persp = 0.0
 
-    tilt_dir = +1 if far_side == "right" else -1
+    tilt_dir = +1 if far_side=="right" else -1
     top_base = 0.20
     bot_base = 0.88
 
-    is_rear  = (facing == "rear") or (
-        facing == "side" and (rl + rr) >= (wl + wr)
-    )
+    is_rear  = (facing=="rear") or (facing=="side" and (rl+rr)>=(wl+wr))
     panel    = "Coffre"     if is_rear else "Capot"
     pc_label = "Pare-ch.AR" if is_rear else "Pare-ch.AV"
 
     def zone(name, a, b):
-        return {
-            "name": name,
-            "poly": make_poly(
-                crop_w, crop_h,
-                int(a * crop_w), int(b * crop_w),
-                top_base, bot_base, persp, tilt_dir
-            )
-        }
+        return {"name": name, "poly": make_poly(
+            crop_w, crop_h, int(a*crop_w), int(b*crop_w),
+            top_base, bot_base, persp, tilt_dir
+        )}
 
-    log_label = ""
-
-    # 0-25° : PROFIL
     if angle <= 25:
-        log_label = f"PROFIL (angle={angle}°) near={near_side} {'AR' if is_rear else 'AV'}"
-        if near_side == "right":
-            if is_rear:
-                return [
-                    zone("Aile AV",  0.00, 0.20),
-                    zone("Porte AV", 0.20, 0.48),
-                    zone("Porte AR", 0.48, 0.78),
-                    zone("Aile AR",  0.78, 1.00),
-                ], log_label
-            else:
-                return [
-                    zone("Aile AR",  0.00, 0.20),
-                    zone("Porte AR", 0.20, 0.48),
-                    zone("Porte AV", 0.48, 0.78),
-                    zone("Aile AV",  0.78, 1.00),
-                ], log_label
+        log = f"PROFIL(angle={angle}) near={near_side}"
+        if near_side=="right":
+            return ([zone("Aile AV",0.00,0.20), zone("Porte AV",0.20,0.48),
+                     zone("Porte AR",0.48,0.78), zone("Aile AR",0.78,1.00)]
+                    if is_rear else
+                    [zone("Aile AR",0.00,0.20), zone("Porte AR",0.20,0.48),
+                     zone("Porte AV",0.48,0.78), zone("Aile AV",0.78,1.00)]), log
         else:
-            if is_rear:
-                return [
-                    zone("Aile AR",  0.00, 0.22),
-                    zone("Porte AR", 0.22, 0.52),
-                    zone("Porte AV", 0.52, 0.80),
-                    zone("Aile AV",  0.80, 1.00),
-                ], log_label
-            else:
-                return [
-                    zone("Aile AV",  0.00, 0.22),
-                    zone("Porte AV", 0.22, 0.52),
-                    zone("Porte AR", 0.52, 0.80),
-                    zone("Aile AR",  0.80, 1.00),
-                ], log_label
+            return ([zone("Aile AR",0.00,0.22), zone("Porte AR",0.22,0.52),
+                     zone("Porte AV",0.52,0.80), zone("Aile AV",0.80,1.00)]
+                    if is_rear else
+                    [zone("Aile AV",0.00,0.22), zone("Porte AV",0.22,0.52),
+                     zone("Porte AR",0.52,0.80), zone("Aile AR",0.80,1.00)]), log
 
-    # 25-55° : 3/4 LEGER
     elif angle <= 55:
-        log_label = f"3/4 LEGER (angle={angle}°) near={near_side} {'AR' if is_rear else 'AV'}"
-        if near_side == "right":
-            if is_rear:
-                return [
-                    zone("Porte AV", 0.00, 0.22),
-                    zone("Porte AR", 0.22, 0.50),
-                    zone("Aile AR",  0.50, 0.72),
-                    zone(pc_label,   0.72, 1.00),
-                ], log_label
-            else:
-                return [
-                    zone("Porte AR", 0.00, 0.22),
-                    zone("Porte AV", 0.22, 0.50),
-                    zone("Aile AV",  0.50, 0.72),
-                    zone(pc_label,   0.72, 1.00),
-                ], log_label
+        log = f"3/4 LEGER(angle={angle}) near={near_side}"
+        if near_side=="right":
+            return ([zone("Porte AV",0.00,0.22), zone("Porte AR",0.22,0.50),
+                     zone("Aile AR",0.50,0.72), zone(pc_label,0.72,1.00)]
+                    if is_rear else
+                    [zone("Porte AR",0.00,0.22), zone("Porte AV",0.22,0.50),
+                     zone("Aile AV",0.50,0.72), zone(pc_label,0.72,1.00)]), log
         else:
-            if is_rear:
-                return [
-                    zone(pc_label,   0.00, 0.28),
-                    zone("Aile AR",  0.28, 0.50),
-                    zone("Porte AR", 0.50, 0.78),
-                    zone("Porte AV", 0.78, 1.00),
-                ], log_label
-            else:
-                return [
-                    zone(pc_label,   0.00, 0.28),
-                    zone("Aile AV",  0.28, 0.50),
-                    zone("Porte AV", 0.50, 0.78),
-                    zone("Porte AR", 0.78, 1.00),
-                ], log_label
+            return ([zone(pc_label,0.00,0.28), zone("Aile AR",0.28,0.50),
+                     zone("Porte AR",0.50,0.78), zone("Porte AV",0.78,1.00)]
+                    if is_rear else
+                    [zone(pc_label,0.00,0.28), zone("Aile AV",0.28,0.50),
+                     zone("Porte AV",0.50,0.78), zone("Porte AR",0.78,1.00)]), log
 
-    # 55-80° : 3/4 MARQUE
     elif angle <= 80:
-        log_label = f"3/4 MARQUE (angle={angle}°) near={near_side} {'AR' if is_rear else 'AV'}"
-        if near_side == "right":
-            return [
-                zone("Aile AR" if is_rear else "Aile AV", 0.42, 0.68),
-                zone(panel,                               0.68, 0.85),
-                zone(pc_label,                            0.85, 1.00),
-            ], log_label
+        log = f"3/4 MARQUE(angle={angle}) near={near_side}"
+        if near_side=="right":
+            return [zone("Aile AR" if is_rear else "Aile AV",0.42,0.68),
+                    zone(panel,0.68,0.85), zone(pc_label,0.85,1.00)], log
         else:
-            return [
-                zone(pc_label,                            0.00, 0.15),
-                zone(panel,                               0.15, 0.32),
-                zone("Aile AR" if is_rear else "Aile AV", 0.32, 0.58),
-            ], log_label
+            return [zone(pc_label,0.00,0.15), zone(panel,0.15,0.32),
+                    zone("Aile AR" if is_rear else "Aile AV",0.32,0.58)], log
 
-    # 80-90° : FACE / DOS
     else:
-        log_label = f"FACE/DOS (angle={angle}°) {'AR' if is_rear else 'AV'}"
+        log = f"FACE/DOS(angle={angle})"
         if is_rear:
-            return [
-                zone("Aile AR G", 0.00, 0.20),
-                zone(pc_label,    0.20, 0.55),
-                zone(panel,       0.45, 0.80),
-                zone("Aile AR D", 0.80, 1.00),
-            ], log_label
+            return [zone("Aile AR G",0.00,0.20), zone(pc_label,0.20,0.55),
+                    zone(panel,0.45,0.80), zone("Aile AR D",0.80,1.00)], log
         else:
-            return [
-                zone("Aile AV G", 0.00, 0.20),
-                zone(pc_label,    0.20, 0.55),
-                zone(panel,       0.45, 0.80),
-                zone("Aile AV D", 0.80, 1.00),
-            ], log_label
+            return [zone("Aile AV G",0.00,0.20), zone(pc_label,0.20,0.55),
+                    zone(panel,0.45,0.80), zone("Aile AV D",0.80,1.00)], log
 
 
 # =========================
@@ -483,14 +418,6 @@ def analyse():
         if not cars:
             return jsonify({"error": "Car not detected"}), 400
 
-        # ===== MARQUE / MODELE =====
-        car_info = call_car_make_model(resized_path)
-        # Si YOLO renvoie deja make/model, on les utilise
-        if yolo_result.get("make"):
-            car_info["make"]  = yolo_result.get("make", car_info["make"])
-        if yolo_result.get("model"):
-            car_info["model"] = yolo_result.get("model", car_info["model"])
-
         scale_x = orig_w / YOLO_W
         scale_y = orig_h / YOLO_H
 
@@ -499,15 +426,12 @@ def analyse():
         raw_x2 = int(max(d["box"][2] for d in cars) * scale_x)
         raw_y2 = int(max(d["box"][3] for d in cars) * scale_y)
 
-        pad_x = int(15 * scale_x)
-        pad_y = int(10 * scale_y)
-        thr_x = int(150 * scale_x)
-        thr_y = int(80  * scale_y)
-
-        x1 = 0      if raw_x1 < thr_x            else max(0,      raw_x1 - pad_x)
-        x2 = orig_w if (orig_w - raw_x2) < thr_x else min(orig_w, raw_x2 + pad_x)
-        y1 = 0      if raw_y1 < thr_y            else max(0,      raw_y1 - pad_y)
-        y2 = orig_h if (orig_h - raw_y2) < thr_y else min(orig_h, raw_y2 + pad_y)
+        pad_x = int(15*scale_x); pad_y = int(10*scale_y)
+        thr_x = int(150*scale_x); thr_y = int(80*scale_y)
+        x1 = 0      if raw_x1<thr_x            else max(0,      raw_x1-pad_x)
+        x2 = orig_w if (orig_w-raw_x2)<thr_x   else min(orig_w, raw_x2+pad_x)
+        y1 = 0      if raw_y1<thr_y            else max(0,      raw_y1-pad_y)
+        y2 = orig_h if (orig_h-raw_y2)<thr_y   else min(orig_h, raw_y2+pad_y)
 
         x1, y1, x2, y2 = refine_car_bbox(img_orig, x1, y1, x2, y2)
         car_crop = img_orig[y1:y2, x1:x2]
@@ -515,183 +439,204 @@ def analyse():
             return jsonify({"error": "invalid crop"}), 400
         crop_h, crop_w = car_crop.shape[:2]
 
-        lights = detect_lights(car_crop)
+        # ===== LUMIÈRES + ORIENTATION + ANGLE =====
+        lights                            = detect_lights(car_crop)
         rear_side, front_side, facing, fr_log = detect_front_rear(lights)
-        angle = estimate_angle(lights, crop_w, crop_h, facing)
+        angle                             = estimate_angle(lights, crop_w, crop_h, facing)
         fr_log.append(f"Angle estime: {angle}°")
 
+        # ===== ZONES =====
         zones, zone_decision = build_zones(
             crop_w, crop_h, angle, rear_side, front_side, facing, lights
         )
-        fr_log.append(f"Decision zones: {zone_decision}")
+        fr_log.append(zone_decision)
 
+        # ===== MASQUE + ESPACES COLORIMÉTRIQUES =====
         hsv_full  = cv2.cvtColor(car_crop, cv2.COLOR_BGR2HSV)
-        mask_dark = cv2.inRange(hsv_full, (0, 0, 0),   (180, 255, 45))
-        mask_sky  = cv2.inRange(hsv_full, (0, 0, 210), (180, 18, 255))
-        mask_body = cv2.bitwise_not(cv2.bitwise_or(mask_dark, mask_sky))
-        kernel    = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-        mask_body = cv2.morphologyEx(mask_body, cv2.MORPH_CLOSE, kernel)
+        lab_full  = cv2.cvtColor(car_crop, cv2.COLOR_BGR2LAB)
+        gray_full = cv2.cvtColor(car_crop, cv2.COLOR_BGR2GRAY)
+        mask_body = build_body_mask(car_crop, hsv_full)
 
-        all_valid = hsv_full[mask_body > 0]
-        if len(all_valid) < 100:
+        # ===== RÉFÉRENCE GLOBALE LAB (percentiles 10-90) =====
+        vl_all = lab_full[mask_body > 0]
+        if len(vl_all) < 100:
             return jsonify({"error": "No body pixels found"}), 400
 
+        L_all  = vl_all[:, 0]
+        p10    = np.percentile(L_all, 10)
+        p90    = np.percentile(L_all, 90)
+        keep   = (L_all >= p10) & (L_all <= p90)
+        vl_ref = vl_all[keep]
+
         ref_color = np.array([
-            float(np.median(all_valid[:, 0])),
-            float(np.median(all_valid[:, 1])),
-            float(np.median(all_valid[:, 2]))
+            float(np.median(vl_ref[:, 0])),
+            float(np.median(vl_ref[:, 1])),
+            float(np.median(vl_ref[:, 2]))
         ])
 
+        nat_std_a = max(float(np.std(vl_ref[:, 1])), 1.0)
+        nat_std_b = max(float(np.std(vl_ref[:, 2])), 1.0)
+
+        # Texture ref sur masque seulement
+        lap_full  = cv2.Laplacian(gray_full, cv2.CV_64F)
+        ref_tex   = float(np.var(lap_full[mask_body > 0]))
+        ref_tex   = max(ref_tex, 1.0)
+
+        # =============================================
+        # SEUILS ADAPTATIFS SELON LA COULEUR
+        #
+        # Le problème central : une voiture NOIRE a
+        # une variabilité naturelle plus faible qu'une
+        # voiture ARGENT. Les mêmes seuils fixes
+        # donnent trop de faux positifs sur les noires.
+        #
+        # Solution : on ajuste les seuils selon la
+        # luminosité de référence (L de LAB) :
+        #
+        # Voiture sombre (L < 80)  → seuils plus hauts
+        #   car les différences de teinte sont comprimées
+        # Voiture claire (L > 160) → seuils normaux
+        # Voiture argent (L 80-160)→ seuils intermédiaires
+        #
+        # Seuil ROUGE  : score > thresh_red  → "Peinture refaite!"
+        # Seuil ORANGE : score > thresh_susp → "Variation suspecte"
+        # =============================================
+        med_L = float(np.median(vl_ref[:, 0]))
+
+        if med_L < 70:
+            # Voiture très sombre (noir, bleu foncé)
+            thresh_red  = 3.5
+            thresh_susp = 2.0
+        elif med_L < 110:
+            # Voiture sombre (gris foncé, bordeaux)
+            thresh_red  = 2.8
+            thresh_susp = 1.6
+        elif med_L < 150:
+            # Voiture intermédiaire (gris, rouge)
+            thresh_red  = 2.2
+            thresh_susp = 1.2
+        else:
+            # Voiture claire (blanc, beige, argent)
+            thresh_red  = 1.8
+            thresh_susp = 1.0
+
+        # ===== DESSIN =====
         final_img  = img_orig.copy()
-        thick_box  = max(3, int(4 * min(scale_x, scale_y)))
-        thick_line = max(1, int(1 * min(scale_x, scale_y)))
-        font_big   = max(0.55, 0.58 * min(scale_x, scale_y))
-        font_med   = max(0.42, 0.44 * min(scale_x, scale_y))
-        font_thick = max(2, int(2 * min(scale_x, scale_y)))
+        thick_box  = max(3, int(4*min(scale_x, scale_y)))
+        thick_line = max(1, int(1*min(scale_x, scale_y)))
+        font_big   = max(0.55, 0.58*min(scale_x, scale_y))
+        font_med   = max(0.42, 0.44*min(scale_x, scale_y))
+        font_thick = max(2, int(2*min(scale_x, scale_y)))
 
         cv2.rectangle(final_img, (x1, y1), (x2, y2), (220, 220, 220), thick_line)
 
-        # En-tete avec marque/modele + orientation
-        header = f"{car_info['make']} {car_info['model']} | {'AR' if facing=='rear' else ('AV' if facing=='front' else 'COTE')} | {angle}°"
-        (hw, hh), _ = cv2.getTextSize(header, cv2.FONT_HERSHEY_SIMPLEX, font_med * 1.2, font_thick)
-        cv2.rectangle(final_img, (5, 5), (15 + hw, 20 + hh), (0, 0, 0), -1)
-        cv2.putText(final_img, header, (10, 15 + hh),
-                    cv2.FONT_HERSHEY_SIMPLEX, font_med * 1.2,
-                    (255, 255, 255), font_thick)
-
         results_zones = []
-        detected = 0
+        detected      = 0
 
         for idx, zone in enumerate(zones, start=1):
             poly_local  = zone["poly"]
             poly_global = np.array(
-                [[x1 + p[0], y1 + p[1]] for p in poly_local], dtype=np.int32
+                [[x1+p[0], y1+p[1]] for p in poly_local],
+                dtype=np.int32
             )
 
-            zone_color, px_count, stats = get_poly_color(hsv_full, mask_body, poly_local)
+            # Couleur LAB de la zone
+            zone_color, px_count = get_poly_color_lab(
+                lab_full, mask_body, poly_local
+            )
+
+            # Texture de la zone sur masque seulement
+            h_c, w_c  = lab_full.shape[:2]
+            poly_mask = np.zeros((h_c, w_c), dtype=np.uint8)
+            cv2.fillPoly(poly_mask,
+                         [np.array(poly_local, dtype=np.int32)], 255)
+            comb      = cv2.bitwise_and(poly_mask, mask_body)
+            lap_z     = lap_full[comb > 0]
+            zone_tex  = float(np.var(lap_z)) if len(lap_z) > 100 else ref_tex
 
             if zone_color is None:
-                color_rect, label_score, diff, verdict = (150,150,150), "N/A", 0.0, "Non analysable"
-                std_h = std_s = std_v = 0.0
+                color_rect  = (150, 150, 150)
+                label_score = "N/A"
+                score       = 0.0
+                verdict     = "Non analysable"
             else:
-                # ecart de TEINTE (H) seulement -> plus fiable que la norme HSV
-                diff_h = abs(float(zone_color[0]) - float(ref_color[0]))
-                diff_h = min(diff_h, 180.0 - diff_h)  # H est circulaire
-                diff   = diff_h
-                std_h  = stats["std_h"]
-                std_s  = stats["std_s"]
-                std_v  = stats["std_v"]
-
-                # =====================================================
-                # VERDICT ADAPTATIF SELON LE TYPE DE PEINTURE
-                #
-                # Probleme observe :
-                # - Voiture noire/blanche : la teinte H est INSTABLE
-                #   (saturation trop faible) -> H=78 ne veut rien dire.
-                #   En plus les reflets gonflent std_s et std_v.
-                # - Voiture coloree (vert, rouge, bleu...) : H est tres
-                #   fiable, c'est le signal principal.
-                #
-                # Regle :
-                #  * Si zone ET reference ont S >= 30 -> mode COULEUR
-                #      (H fiable, on regarde diff_H + appui std_s)
-                #  * Sinon -> mode MONOCHROME
-                #      (H ignore, on compare la LUMINOSITE V mediane)
-                # =====================================================
-                zone_S = float(zone_color[1])
-                zone_V = float(zone_color[2])
-                ref_S  = float(ref_color[1])
-                ref_V  = float(ref_color[2])
-
-                diff_v_med = abs(zone_V - ref_V)
-                h_reliable = (zone_S >= 30.0) and (ref_S >= 30.0)
-
-                if h_reliable:
-                    # ----- MODE COULEUR : H fiable -----
-                    # diff H seul suffit s'il est tres marque (>=15)
-                    # sinon on demande confirmation par std_s eleve
-                    if   diff >= 15.0:
-                        verdict_state = "refaite"
-                    elif diff >= 7.0 and std_s <= 10.0:
-                        verdict_state = "refaite"
-                    elif diff >= 7.0:
-                        verdict_state = "suspecte"
-                    elif diff >= 5.0 and std_s >= 18.0 and std_v >= 35.0:
-                        verdict_state = "suspecte"
-                    else:
-                        verdict_state = "ok"
-                    mode_tag = "C"  # Color
-                    combo_score = diff * 2.0 + max(0.0, std_s - 8.0) * 0.6
-                else:
-                    # ----- MODE MONOCHROME : H ignore -----
-                    # On compare la LUMINOSITE mediane V de la zone
-                    # avec celle de la voiture. Repeinture mate/brillante
-                    # se traduit par une zone plus sombre OU plus claire.
-                    # Tolerance large car reflets/vitres tirent V.
-                    if   diff_v_med >= 45.0 and std_s >= 25.0:
-                        verdict_state = "refaite"
-                    elif diff_v_med >= 60.0:
-                        verdict_state = "refaite"
-                    elif diff_v_med >= 30.0 and std_s >= 35.0:
-                        verdict_state = "suspecte"
-                    else:
-                        verdict_state = "ok"
-                    mode_tag = "M"  # Monochrome
-                    combo_score = diff_v_med * 1.2
-
-                if   verdict_state == "refaite":
-                    color_rect, verdict = (0, 0, 255),   "Peinture refaite!";  detected += 1
-                elif verdict_state == "suspecte":
-                    color_rect, verdict = (0, 165, 255), "Variation suspecte"; detected += 1
-                else:
-                    color_rect, verdict = (0, 210, 0),   "OK"
-
-                label_score = (
-                    f"H{int(diff)}/S{int(std_s)}/V{int(std_v)}"
-                    f"/dV{int(diff_v_med)}/{mode_tag}{int(combo_score)}"
+                score = compute_score(
+                    zone_color, ref_color,
+                    nat_std_a, nat_std_b,
+                    zone_tex, ref_tex
                 )
+                label_score = f"{score:.1f}"
 
+                if score > thresh_red:
+                    color_rect = (0, 0, 255)
+                    verdict    = "Peinture refaite!"
+                    detected  += 1
+                elif score > thresh_susp:
+                    color_rect = (0, 165, 255)
+                    verdict    = "Variation suspecte"
+                    detected  += 1
+                else:
+                    color_rect = (0, 210, 0)
+                    verdict    = "OK"
+
+            # Remplissage semi-transparent
             overlay = final_img.copy()
             cv2.fillPoly(overlay, [poly_global], color_rect)
             cv2.addWeighted(overlay, 0.22, final_img, 0.78, 0, final_img)
+
+            # Contour
             cv2.polylines(final_img, [poly_global], True, color_rect, thick_box)
 
+            # Cercle numéroté
             cx = int(np.mean(poly_global[:, 0]))
             cy = int(np.mean(poly_global[:, 1]))
-            radius = max(18, int(20 * min(scale_x, scale_y)))
-            cv2.circle(final_img, (cx + 2, cy + 2), radius, (0, 0, 0), -1)
-            cv2.circle(final_img, (cx, cy), radius, color_rect, -1)
-            cv2.circle(final_img, (cx, cy), radius, (255, 255, 255), 2)
+            radius = max(18, int(20*min(scale_x, scale_y)))
+            cv2.circle(final_img, (cx+2, cy+2), radius, (0, 0, 0), -1)
+            cv2.circle(final_img, (cx, cy),   radius, color_rect, -1)
+            cv2.circle(final_img, (cx, cy),   radius, (255, 255, 255), 2)
             num_txt = str(idx)
-            (tw, th), _ = cv2.getTextSize(num_txt, cv2.FONT_HERSHEY_SIMPLEX, font_big * 1.3, font_thick + 1)
-            cv2.putText(final_img, num_txt, (cx - tw // 2, cy + th // 2),
-                        cv2.FONT_HERSHEY_SIMPLEX, font_big * 1.3,
-                        (255, 255, 255), font_thick + 1)
+            (tw, th), _ = cv2.getTextSize(
+                num_txt, cv2.FONT_HERSHEY_SIMPLEX, font_big*1.3, font_thick+1
+            )
+            cv2.putText(final_img, num_txt,
+                        (cx-tw//2, cy+th//2),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        font_big*1.3, (255, 255, 255), font_thick+1)
 
-            top_pt = poly_global[poly_global[:, 1].argmin()]
-            lbl_x  = max(5, int(top_pt[0]))
-            lbl_y  = max(20, int(top_pt[1]) - 10)
-            label_full = f"{idx}. {zone['name']}  E:{label_score}"
-            (lw, lh), _ = cv2.getTextSize(label_full, cv2.FONT_HERSHEY_SIMPLEX, font_med, font_thick)
+            # Étiquette repositionnée si hors image
+            top_pt  = poly_global[poly_global[:, 1].argmin()]
+            lbl_x   = max(5, int(top_pt[0]))
+            lbl_y   = max(20, int(top_pt[1]) - 10)
+            lbl_txt = f"{idx}. {zone['name']}  S:{label_score}"
+            (lw, lh), _ = cv2.getTextSize(
+                lbl_txt, cv2.FONT_HERSHEY_SIMPLEX, font_med, font_thick
+            )
             lbl_x = min(lbl_x, orig_w - lw - 10)
-            cv2.rectangle(final_img, (lbl_x - 4, lbl_y - lh - 6),
-                          (lbl_x + lw + 6, lbl_y + 4), (0, 0, 0), -1)
-            cv2.putText(final_img, label_full, (lbl_x, lbl_y),
-                        cv2.FONT_HERSHEY_SIMPLEX, font_med,
-                        (255, 255, 255), font_thick)
+            cv2.rectangle(final_img,
+                          (lbl_x-4, lbl_y-lh-6),
+                          (lbl_x+lw+6, lbl_y+4),
+                          (0, 0, 0), -1)
+            cv2.putText(final_img, lbl_txt, (lbl_x, lbl_y),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        font_med, (255, 255, 255), font_thick)
 
             results_zones.append({
-                "idx": idx, "zone": zone["name"], "diff": round(diff, 1),
-                "std_h": round(std_h, 2), "std_s": round(std_s, 2), "std_v": round(std_v, 2),
-                "pixels": px_count, "verdict": verdict,
+                "idx":     idx,
+                "zone":    zone["name"],
+                "score":   score,
+                "pixels":  px_count,
+                "verdict": verdict,
                 "polygon": poly_global.tolist()
             })
 
-        diffs       = [z["diff"] for z in results_zones if z["diff"] > 0]
-        final_score = min(int(np.mean(diffs)) if diffs else 0, 100)
-        if   final_score < 10: result = "Peinture homogene (OK)"
-        elif final_score < 28: result = "Legeres variations detectees"
-        else:                  result = "Difference importante - repeinture probable"
+        # ===== SCORE GLOBAL =====
+        scores      = [z["score"] for z in results_zones if z["score"] > 0]
+        score_raw   = float(np.mean(scores)) if scores else 0.0
+        score_100   = min(int(score_raw * 30), 100)
+
+        if   score_raw > thresh_red:  result = "Difference importante - repeinture probable"
+        elif score_raw > thresh_susp: result = "Legeres variations detectees"
+        else:                         result = "Peinture homogene (OK)"
 
         analysed_name = "analysed_" + filename
         cv2.imwrite(os.path.join(UPLOAD_FOLDER, analysed_name), final_img)
@@ -700,9 +645,9 @@ def analyse():
 
         return jsonify({
             "yolo":            yolo_result,
-            "car":             car_info,
             "angle_estime":    angle,
-            "score":           final_score,
+            "score":           score_100,
+            "score_raw":       round(score_raw, 2),
             "result":          result,
             "zones":           results_zones,
             "zones_detected":  detected,
@@ -711,14 +656,22 @@ def analyse():
             "front_side":      front_side,
             "orientation_log": fr_log,
             "lights":          lights,
-            "image_size":      {"width": orig_w, "height": orig_h},
-            "reference_hsv": {
-                "H": round(ref_color[0], 1),
-                "S": round(ref_color[1], 1),
-                "V": round(ref_color[2], 1)
+            "seuils": {
+                "rouge":   thresh_red,
+                "suspect": thresh_susp,
+                "med_L":   round(med_L, 1)
             },
-            "image_result":    analysed_name,
-            "image_url":       request.host_url + "uploads/" + analysed_name
+            "calibration": {
+                "nat_std_a":   round(nat_std_a, 1),
+                "nat_std_b":   round(nat_std_b, 1),
+                "ref_L":       round(ref_color[0], 1),
+                "ref_a":       round(ref_color[1], 1),
+                "ref_b":       round(ref_color[2], 1),
+                "ref_texture": round(ref_tex, 1)
+            },
+            "image_size":   {"width": orig_w, "height": orig_h},
+            "image_result": analysed_name,
+            "image_url":    request.host_url + "uploads/" + analysed_name
         })
 
     except Exception as e:
