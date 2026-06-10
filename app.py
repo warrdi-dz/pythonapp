@@ -465,15 +465,23 @@ def analyse():
                 #   - texture/brillance tres differente du reste    -> indice
                 h_reliable = (zone_S >= 35.0) and (dom_S >= 35.0)
 
+                # ===== FILTRE REFLET / VITRE =====
+                # Une zone bien moins saturee que la carrosserie globale = vitre/reflet
+                # -> on ne juge PAS, on retourne OK pour ne pas faire de faux positif.
+                is_reflection = (diff_s <= -35.0) or (zone_S < 18.0 and dom_S >= 25.0)
+
                 score = 0.0
-                # Composante V (luminosite - signal principal)
+                # Composante V (clarte/foncage vs teinte globale = signal principal)
                 score += diff_v_abs * 1.0
-                # Composante S (saturation absolue)
-                score += abs(diff_s) * 0.6
-                # Composante H seulement si fiable
+                # Composante S (saturation) - on penalise surtout si S superieur (zone plus "coloree")
+                if diff_s > 0:
+                    score += diff_s * 0.8
+                else:
+                    score += abs(diff_s) * 0.3
+                # Composante H seulement si la couleur est saturee de part et d'autre
                 if h_reliable:
                     score += diff_h * 1.3
-                # Composante TEXTURE: si la zone est BEAUCOUP plus lisse ou plus rugueuse
+                # Composante TEXTURE
                 tex_penalty = 0.0
                 if tex_ratio < 0.55 or tex_ratio > 1.8:
                     tex_penalty = 6.0
@@ -481,16 +489,18 @@ def analyse():
                     tex_penalty = 3.0
                 score += tex_penalty
 
-                # Seuils
-                if h_reliable:
-                    # voiture coloree
-                    if   55>=score >= 30.0: verdict_state = "refaite"
-                    elif 30>score >= 10.0: verdict_state = "suspecte"
+                if is_reflection:
+                    # vitre / reflet : on ne flag pas
+                    verdict_state = "ok"
+                elif h_reliable:
+                    # voiture coloree : H fiable
+                    if   score >= 22.0: verdict_state = "refaite"
+                    elif score >= 14.0: verdict_state = "suspecte"
                     else:               verdict_state = "ok"
                 else:
-                    # voiture monochrome (noir/blanc/gris) -> H ignore, on durcit
-                    if   diff_v_abs >= 45.0 and score >= 30.0: verdict_state = "refaite"
-                    elif diff_v_abs >= 32.0 and score >= 22.0: verdict_state = "suspecte"
+                    # voiture monochrome (noir/blanc/gris) -> H ignore, seuils plus stricts
+                    if   diff_v_abs >= 60.0 and score >= 55.0: verdict_state = "refaite"
+                    elif diff_v_abs >= 45.0 and score >= 40.0: verdict_state = "suspecte"
                     else:                                       verdict_state = "ok"
 
                 if   verdict_state == "refaite":
