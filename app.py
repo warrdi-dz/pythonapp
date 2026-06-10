@@ -586,7 +586,7 @@ def analyse():
                 #   - diff (mediane H)  : couleur globale
                 #   - std_s             : empreinte chimique de la peinture
                 #   - std_v             : texture / mastic / grain
-                suspect_color   = 15>= diff  >= 7
+                suspect_color   = 7>= diff  >= 6
                 suspect_satur   = std_s > 7
                 suspect_texture = std_v < 30
 
