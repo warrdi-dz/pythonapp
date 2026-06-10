@@ -587,7 +587,7 @@ def analyse():
                 #   - std_s             : empreinte chimique de la peinture
                 #   - std_v             : texture / mastic / grain
                 suspect_color   = 7>= diff  >= 4
-                suspect_satur   = std_s < 40
+                suspect_satur   = std_s < 30
                 suspect_texture = std_v > 40
 
                 if suspect_color and  suspect_texture :
