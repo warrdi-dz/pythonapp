@@ -590,7 +590,7 @@ def analyse():
                 suspect_satur   = std_s > 10 
                 suspect_texture = std_v < 30
 
-                if suspect_texture :
+                if suspect_color :
                     color_rect, verdict = (0, 0, 255),   "Peinture refaite!";  detected += 1
                 elif suspect_color or (suspect_satur and suspect_texture):
                     color_rect, verdict = (0, 165, 255), "Variation suspecte"; detected += 1
