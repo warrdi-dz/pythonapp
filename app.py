@@ -484,7 +484,7 @@ def analyse():
                 # Seuils
                 if h_reliable:
                     # voiture coloree
-                    if   10>=score >= 4.0: verdict_state = "refaite"
+                    if   55>=score >= 30.0: verdict_state = "refaite"
                     elif 30>score >= 10.0: verdict_state = "suspecte"
                     else:               verdict_state = "ok"
                 else:
