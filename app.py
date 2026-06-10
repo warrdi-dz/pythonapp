@@ -588,7 +588,7 @@ def analyse():
                 #   - std_v             : texture / mastic / grain
                 suspect_color   = 7>= diff  >= 4
                 suspect_satur   = std_s < 30
-                suspect_texture = std_v > 40
+                suspect_texture = std_v < 40
 
                 if suspect_color and  suspect_texture :
                     color_rect, verdict = (0, 0, 255),   "Peinture refaite!";  detected += 1
