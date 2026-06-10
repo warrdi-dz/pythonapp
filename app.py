@@ -485,7 +485,7 @@ def analyse():
                 if h_reliable:
                     # voiture coloree
                     if   score <= 22.0: verdict_state = "refaite"
-                    elif score >= 14.0: verdict_state = "suspecte"
+                    elif score <= 14.0: verdict_state = "suspecte"
                     else:               verdict_state = "ok"
                 else:
                     # voiture monochrome (noir/blanc/gris) -> H ignore, on durcit
