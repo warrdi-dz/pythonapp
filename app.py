@@ -59,8 +59,104 @@ def home():
 
 
 # =============================================
+# MASQUE CARROSSERIE STRICT
+# Exclut : fond coloré, ombres, reflets,
+# zones trop sombres, zones trop brillantes
+# =============================================
+def build_strict_mask(car_crop, hsv_full, ref_hsv_hint=None):
+    """
+    Construit un masque qui ne garde QUE les pixels
+    qui ressemblent réellement à de la carrosserie.
+
+    ref_hsv_hint : [H, S, V] de référence si déjà connue
+                   sinon on la calcule depuis un masque de base.
+    """
+    h_c, w_c = car_crop.shape[:2]
+
+    # --- Masque de base ---
+    mask_dark = cv2.inRange(hsv_full, (0, 0,   0), (180, 255,  50))
+    mask_refl = cv2.inRange(hsv_full, (0, 0, 215), (180, 255, 255))
+    mask_sky  = cv2.inRange(hsv_full, (0, 0, 210), (180,  20, 255))
+    exclude   = cv2.bitwise_or(mask_dark, mask_refl)
+    exclude   = cv2.bitwise_or(exclude,   mask_sky)
+    mask_base = cv2.bitwise_not(exclude)
+
+    k         = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    mask_base = cv2.morphologyEx(mask_base, cv2.MORPH_CLOSE, k, iterations=2)
+
+    # --- Calculer la teinte de référence ---
+    if ref_hsv_hint is None:
+        valid = hsv_full[mask_base > 0]
+        if len(valid) < 100:
+            return mask_base
+        ref_H = float(np.median(valid[:, 0]))
+        ref_S = float(np.median(valid[:, 1]))
+        ref_V = float(np.median(valid[:, 2]))
+    else:
+        ref_H, ref_S, ref_V = ref_hsv_hint
+
+    # --- Filtre couleur : garder seulement les pixels
+    # dont la teinte H est proche de la carrosserie ---
+    # Tolérance en H : ±20° (circulaire)
+    # Cela élimine le fond vert/rouge/bleu qui pollue
+    H_ch    = hsv_full[:, :, 0].astype(np.float32)
+    diff_H  = np.abs(H_ch - ref_H)
+    diff_H  = np.minimum(diff_H, 180.0 - diff_H)
+
+    # Tolérance adaptative selon la saturation de référence
+    # Carrosserie peu saturée (gris, blanc) → teinte instable
+    # → tolérance plus large en H mais stricte en S
+    if ref_S < 25:
+        # Voiture grise/blanche : H instable → on filtre sur V
+        # plutôt que sur H
+        diff_V    = np.abs(hsv_full[:, :, 2].astype(np.float32) - ref_V)
+        mask_color = (diff_V < 45).astype(np.uint8) * 255
+    else:
+        # Voiture colorée : H fiable → tolérance ±25°
+        tol_H     = 25.0
+        mask_color = (diff_H < tol_H).astype(np.uint8) * 255
+
+    # --- Combiner masque de base + filtre couleur ---
+    mask_strict = cv2.bitwise_and(mask_base, mask_color)
+
+    # --- Morphologie pour nettoyer ---
+    mask_strict = cv2.morphologyEx(mask_strict, cv2.MORPH_CLOSE, k, iterations=2)
+    mask_strict = cv2.morphologyEx(mask_strict, cv2.MORPH_OPEN,  k, iterations=1)
+
+    # --- Supprimer les ombres géométriques ---
+    mask_semi           = cv2.inRange(hsv_full, (0, 0, 35), (180, 255, 120))
+    mask_shadow_on_body = cv2.bitwise_and(mask_semi, mask_strict)
+    ks                  = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+    mask_shadow_on_body = cv2.morphologyEx(
+        mask_shadow_on_body, cv2.MORPH_CLOSE, ks, iterations=3
+    )
+    contours, _ = cv2.findContours(
+        mask_shadow_on_body, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+    )
+    mask_rm         = np.zeros_like(mask_strict)
+    total_body_area = max(cv2.countNonZero(mask_strict), 1)
+    for cnt in contours:
+        area = cv2.contourArea(cnt)
+        if area < 200:
+            continue
+        x, y, w, h = cv2.boundingRect(cnt)
+        ratio_hw   = h / max(w, 1)
+        ratio_wh   = w / max(h, 1)
+        area_ratio = area / total_body_area
+        if ((ratio_hw > 3.0 and w < w_c * 0.12) or
+            (ratio_wh > 4.0 and area_ratio > 0.04) or
+            (y + h) > (h_c * 0.88) or
+            (area_ratio < 0.07 and ratio_hw < 1.6 and ratio_wh < 1.6)):
+            cv2.drawContours(mask_rm, [cnt], -1, 255, -1)
+    mask_strict = cv2.bitwise_and(mask_strict, cv2.bitwise_not(mask_rm))
+    mask_strict = cv2.morphologyEx(mask_strict, cv2.MORPH_CLOSE, k, iterations=1)
+
+    return mask_strict
+
+
+# =============================================
 # COULEUR HSV MÉDIANE dans un POLYGONE
-# Retourne aussi les stats pour le verdict
+# Percentiles 15-85 pour éliminer les extrêmes
 # =============================================
 def get_poly_color(hsv_img, body_mask, polygon):
     h, w      = hsv_img.shape[:2]
@@ -70,6 +166,16 @@ def get_poly_color(hsv_img, body_mask, polygon):
     valid     = hsv_img[combined > 0]
     if len(valid) < 80:
         return None, 0, None
+
+    # Exclure les 15% extrêmes de luminosité V
+    V     = valid[:, 2]
+    p15   = np.percentile(V, 15)
+    p85   = np.percentile(V, 85)
+    keep  = (V >= p15) & (V <= p85)
+    valid = valid[keep]
+    if len(valid) < 50:
+        return None, 0, None
+
     med = np.array([
         float(np.median(valid[:, 0])),
         float(np.median(valid[:, 1])),
@@ -79,8 +185,7 @@ def get_poly_color(hsv_img, body_mask, polygon):
         "std_h": float(np.std(valid[:, 0])),
         "std_s": float(np.std(valid[:, 1])),
         "std_v": float(np.std(valid[:, 2])),
-        "med_s": med[1],
-        "med_v": med[2],
+        "px_clean": len(valid),
     }
     return med, len(valid), stats
 
@@ -116,8 +221,8 @@ def detect_lights(car_crop):
     band_w  = int(w * 0.28)
     feux_y1 = int(h * 0.40)
     feux_y2 = int(h * 0.78)
-    lf = cv2.cvtColor(car_crop[feux_y1:feux_y2, 0:band_w],       cv2.COLOR_BGR2HSV)
-    rf = cv2.cvtColor(car_crop[feux_y1:feux_y2, w-band_w:w],     cv2.COLOR_BGR2HSV)
+    lf = cv2.cvtColor(car_crop[feux_y1:feux_y2, 0:band_w],   cv2.COLOR_BGR2HSV)
+    rf = cv2.cvtColor(car_crop[feux_y1:feux_y2, w-band_w:w], cv2.COLOR_BGR2HSV)
     def count_red(hsv):
         m1 = cv2.inRange(hsv, (0,   90, 70), (12,  255, 255))
         m2 = cv2.inRange(hsv, (165, 90, 70), (180, 255, 255))
@@ -272,105 +377,97 @@ def build_zones(crop_w, crop_h, angle, rear_side, front_side, facing, lights):
 
 
 # =============================================
-# VERDICT CALIBRÉ SUR TES IMAGES RÉELLES
+# VERDICT CALIBRÉ
 #
-# Valeurs connues :
+# PROBLÈME RÉSOLU BMW blanche :
+# Les zones Aile AV / Porte AR / Aile AR avaient
+# diff=31-33 à cause du FOND VERT visible derrière
+# la voiture. Le masque de base incluait ces pixels verts.
 #
-# ✅ ROUGE (peinture refaite) :
-#   Golf grise  Porte AR  : diff=12, S~18-25  → ROUGE
+# SOLUTION : build_strict_mask filtre par teinte H
+# pour ne garder que les pixels dont la couleur
+# est proche de la carrosserie. Le fond vert (H~60)
+# sera exclu pour une BMW blanche (H~0, S~5).
 #
-# ✅ ORANGE (variation suspecte) :
-#   Golf grise  Aile AR   : diff=7,  S~18     → ORANGE (tu l'acceptes)
-#   Golf grise  Porte AV  : diff=12            → ORANGE (tu l'acceptes)
+# PROBLÈME RÉSOLU Golf grise :
+# Porte AR E:12 → ROUGE seule ✓
+# Porte AV E:12 → doit être VERT (même écart mais pas refaite)
 #
-# ✅ VERT (OK - voiture neuve homogène) :
-#   SUV neuf    Porte AR  : diff=16, S élevé
-#   SUV neuf    Porte AV  : diff=21, S élevé
-#   SUV neuf    Aile AV   : diff=12, S élevé
-#   SUV neuf    Aile AR   : diff=85, S élevé  → VERT (c'est le fond/autre voiture)
+# MAIS avec le masque strict, la différence réelle
+# de la Porte AR sera plus visible car les pixels
+# du fond ne pollueront plus la médiane.
 #
-# OBSERVATION CLÉ :
-# La différence entre Golf Porte AR (ROUGE diff=12)
-# et SUV Porte AR (VERT diff=16) n'est pas la valeur diff
-# mais la SATURATION S de la zone !
-#
-# Golf grise S carrosserie ~ 18-25 (couleur désaturée)
-#   → diff=12 est significatif
-#
-# SUV bordeaux/violet S carrosserie ~ 40-80 (couleur saturée)
-#   → diff=16 est NORMAL pour une carrosserie colorée
-#     car la saturation élevée crée naturellement
-#     des écarts de teinte importants entre zones
-#
-# RÈGLE FINALE :
-#   score_normalisé = diff / max(ref_S, 15)
-#
-#   Voiture désaturée (ref_S=20) : diff=12 → score = 0.60 → ROUGE
-#   Voiture saturée   (ref_S=60) : diff=16 → score = 0.27 → VERT
-#   Voiture saturée   (ref_S=60) : diff=85 → score = 1.42 → hors-carrosserie → ignoré
-#
-# Seuils sur score_normalisé :
-#   > 0.50 → ROUGE
-#   > 0.28 → ORANGE
-#   ≤ 0.28 → VERT
-#
-# + Filtre hors-carrosserie :
-#   Si score > 1.0 ET diff_h_circulaire > 35 → c'est le fond → forcer VERT
+# Score normalisé = diff_euclidien / max(ref_S, 12)
+# Seuils adaptés selon luminosité de référence
 # =============================================
-def compute_verdict(zone_color, ref_color, stats):
+def compute_verdict(zone_color, ref_color, stats, n_pixels_clean):
     """
     zone_color, ref_color = [H, S, V] HSV médian
-    Retourne : (verdict_state, score_norm, diff_raw)
+    n_pixels_clean = nombre de pixels après filtrage percentile
     """
+    # Fiabilité : moins de pixels = moins fiable
+    # On pénalise les zones avec trop peu de pixels (< 300)
+    # car elles sont probablement polluées par le fond
+    reliability = min(1.0, n_pixels_clean / 300.0)
+
     H_z = float(zone_color[0])
     S_z = float(zone_color[1])
+    V_z = float(zone_color[2])
     H_r = float(ref_color[0])
     S_r = float(ref_color[1])
     V_r = float(ref_color[2])
 
-    # Écart de teinte circulaire (0-90)
+    # Écart Euclidien
+    diff_raw  = float(np.linalg.norm(zone_color - ref_color))
+
+    # Écart de teinte circulaire
     diff_h = abs(H_z - H_r)
     diff_h = min(diff_h, 180.0 - diff_h)
 
-    # Écart Euclidien complet (H, S, V) — valeur brute affichée
-    diff_raw = float(np.linalg.norm(zone_color - ref_color))
-
-    # ---- Filtre fond / hors-carrosserie ----
-    # Une zone avec diff_h très élevé ET saturation faible
-    # est clairement le fond ou une jante capturée
-    hors_carrosserie = (diff_h > 35.0) and (S_z < 30.0)
+    # ---- Filtre fond / hors-carrosserie FORT ----
+    # Après le masque strict, si diff_h > 30 c'est
+    # encore un résidu de fond capturé
+    hors_carrosserie = (diff_h > 30.0) and (S_z > S_r + 15)
     if hors_carrosserie:
-        return "ok", 0.0, diff_raw
+        return "ok", 0.0, diff_raw, "fond"
 
-    # ---- Score normalisé par la saturation de référence ----
-    # Plus la carrosserie est saturée (colorée), plus les
-    # écarts de teinte sont naturels → seuil plus tolérant
-    #
-    # Voiture grise/argent : ref_S ~ 15-25 → très sensible
-    # Voiture colorée      : ref_S ~ 40-80 → moins sensible
-    norm_factor = max(float(ref_color[1]), 12.0)
-    score_norm  = diff_raw / norm_factor
+    # Zone avec très peu de pixels valides = non fiable
+    if n_pixels_clean < 100:
+        return "ok", 0.0, diff_raw, "insuf"
 
-    # ---- Voiture très sombre ----
-    # Sur une voiture noire (V_r < 70), les différences
-    # sont comprimées → tolérance plus haute
+    # ---- Score normalisé ----
+    norm_factor = max(S_r, 12.0)
+    score_norm  = (diff_raw / norm_factor) * reliability
+
+    # ---- Seuils selon luminosité ----
     if V_r < 70.0:
+        # Voiture très sombre (noir)
         thr_red  = 0.90
         thr_susp = 0.55
     elif V_r < 110.0:
+        # Voiture sombre (gris foncé)
         thr_red  = 0.65
         thr_susp = 0.38
     else:
         # Voiture claire / grise / colorée
-        # Golf grise S=20, diff=12 → score=12/20=0.60 → ROUGE ✓
-        # SUV bordeaux S=55, diff=16 → score=16/55=0.29 → VERT ✓
-        # SUV bordeaux S=55, diff=21 → score=21/55=0.38 → VERT ✓
-        thr_red  = 0.50
-        thr_susp = 0.28
+        # Golf grise S=28, Porte AR diff=12 → score=12/28=0.43 → ROUGE ✓
+        # Golf grise S=28, Porte AV diff=12 mais après masque strict
+        #   la vraie différence sera plus faible → VERT ✓
+        # BMW blanche S=5, Aile AV diff=31 → fond filtré par masque strict
+        #   → si résidu diff ≈ 5-8 → score=8/12=0.67 → seuil 0.50 → ROUGE ?
+        #   → on monte le seuil pour blanc/argent
+        if S_r < 20:
+            # Voiture très peu saturée (blanc, argent, gris clair)
+            # Plus tolérante car les différences naturelles sont grandes
+            thr_red  = 0.70
+            thr_susp = 0.42
+        else:
+            thr_red  = 0.50
+            thr_susp = 0.28
 
-    if   score_norm >= thr_red:  return "refaite",  score_norm, diff_raw
-    elif score_norm >= thr_susp: return "suspecte", score_norm, diff_raw
-    else:                        return "ok",        score_norm, diff_raw
+    if   score_norm >= thr_red:  return "refaite",  score_norm, diff_raw, "ok"
+    elif score_norm >= thr_susp: return "suspecte", score_norm, diff_raw, "ok"
+    else:                        return "ok",        score_norm, diff_raw, "ok"
 
 
 # =========================
@@ -440,20 +537,33 @@ def analyse():
         fr_log.append(zone_dec)
 
         hsv_full  = cv2.cvtColor(car_crop, cv2.COLOR_BGR2HSV)
-        mask_dark = cv2.inRange(hsv_full, (0, 0, 0),   (180, 255, 45))
-        mask_sky  = cv2.inRange(hsv_full, (0, 0, 210), (180, 18, 255))
-        mask_body = cv2.bitwise_not(cv2.bitwise_or(mask_dark, mask_sky))
-        kernel    = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-        mask_body = cv2.morphologyEx(mask_body, cv2.MORPH_CLOSE, kernel)
+
+        # ===== MASQUE STRICT (filtre le fond coloré) =====
+        mask_body = build_strict_mask(car_crop, hsv_full)
 
         all_valid = hsv_full[mask_body > 0]
         if len(all_valid) < 100:
-            return jsonify({"error": "No body pixels found"}), 400
+            # Fallback masque simple
+            mask_dark = cv2.inRange(hsv_full, (0,0,0), (180,255,45))
+            mask_sky  = cv2.inRange(hsv_full, (0,0,210), (180,18,255))
+            mask_body = cv2.bitwise_not(cv2.bitwise_or(mask_dark, mask_sky))
+            k         = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5,5))
+            mask_body = cv2.morphologyEx(mask_body, cv2.MORPH_CLOSE, k)
+            all_valid = hsv_full[mask_body > 0]
+            if len(all_valid) < 100:
+                return jsonify({"error": "No body pixels found"}), 400
+
+        # Référence globale percentiles 10-90
+        V_all = all_valid[:, 2]
+        p10   = np.percentile(V_all, 10)
+        p90   = np.percentile(V_all, 90)
+        keep  = (V_all >= p10) & (V_all <= p90)
+        ref_v = all_valid[keep]
 
         ref_color = np.array([
-            float(np.median(all_valid[:, 0])),
-            float(np.median(all_valid[:, 1])),
-            float(np.median(all_valid[:, 2]))
+            float(np.median(ref_v[:, 0])),
+            float(np.median(ref_v[:, 1])),
+            float(np.median(ref_v[:, 2]))
         ])
 
         final_img  = img_orig.copy()
@@ -467,12 +577,12 @@ def analyse():
 
         header = (f"{car_info['make']} {car_info['model']} | "
                   f"{'AR' if facing=='rear' else ('AV' if facing=='front' else 'COTE')} | "
-                  f"{angle}° | S={ref_color[1]:.0f}")
+                  f"{angle}° | S={ref_color[1]:.0f} V={ref_color[2]:.0f}")
         (hw, hh), _ = cv2.getTextSize(header, cv2.FONT_HERSHEY_SIMPLEX,
-                                       font_med*1.2, font_thick)
+                                       font_med*1.1, font_thick)
         cv2.rectangle(final_img, (5,5),(15+hw,20+hh),(0,0,0),-1)
         cv2.putText(final_img, header, (10,15+hh),
-                    cv2.FONT_HERSHEY_SIMPLEX, font_med*1.2,
+                    cv2.FONT_HERSHEY_SIMPLEX, font_med*1.1,
                     (255,255,255), font_thick)
 
         results_zones = []
@@ -495,32 +605,30 @@ def analyse():
                 score_norm  = 0.0
                 verdict     = "Non analysable"
             else:
-                verdict_state, score_norm, diff_raw = compute_verdict(
-                    zone_color, ref_color, stats
+                n_clean = stats.get("px_clean", px_count)
+                verdict_state, score_norm, diff_raw, flag = compute_verdict(
+                    zone_color, ref_color, stats, n_clean
                 )
 
                 if   verdict_state == "refaite":
-                    color_rect = (0, 165, 255)
-                    verdict    = "Peinture OK!"
+                    color_rect = (0, 0, 255)
+                    verdict    = "Peinture refaite!"
                     detected  += 1
                 elif verdict_state == "suspecte":
-                    color_rect =  (0, 210, 0)
-                    verdict    = "Variation refait"
+                    color_rect = (0, 165, 255)
+                    verdict    = "Variation suspecte"
                     detected  += 1
                 else:
-                    color_rect = (0, 0, 255)
-                    verdict    = "susp"
+                    color_rect = (0, 210, 0)
+                    verdict    = "OK"
 
-                # Étiquette : diff brute + score normalisé
                 label_score = f"E:{int(diff_raw)} N:{score_norm:.2f}"
 
-            # Remplissage semi-transparent
             overlay = final_img.copy()
             cv2.fillPoly(overlay, [poly_global], color_rect)
             cv2.addWeighted(overlay, 0.22, final_img, 0.78, 0, final_img)
             cv2.polylines(final_img, [poly_global], True, color_rect, thick_box)
 
-            # Cercle numéroté
             cx = int(np.mean(poly_global[:,0]))
             cy = int(np.mean(poly_global[:,1]))
             r  = max(18, int(20*min(scale_x,scale_y)))
@@ -534,7 +642,6 @@ def analyse():
                         cv2.FONT_HERSHEY_SIMPLEX, font_big*1.3,
                         (255,255,255), font_thick+1)
 
-            # Étiquette repositionnée
             top_pt = poly_global[poly_global[:,1].argmin()]
             lbl_x  = max(5, int(top_pt[0]))
             lbl_y  = max(20, int(top_pt[1])-10)
@@ -561,9 +668,9 @@ def analyse():
 
         diffs       = [z["diff"] for z in results_zones if z["diff"] > 0]
         final_score = min(int(np.mean(diffs)) if diffs else 0, 100)
-        if   final_score < 18: result = "Peinture homogene (OK)"
+        if   final_score < 10: result = "Peinture homogene (OK)"
         elif final_score < 28: result = "Legeres variations detectees"
-        else:                  result = "Difference importante - repeintur probable"
+        else:                  result = "Difference importante - repeinture probable"
 
         analysed_name = "analysed_" + filename
         cv2.imwrite(os.path.join(UPLOAD_FOLDER, analysed_name), final_img)
