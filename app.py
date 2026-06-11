@@ -561,7 +561,7 @@ def analyse():
 
         diffs       = [z["diff"] for z in results_zones if z["diff"] > 0]
         final_score = min(int(np.mean(diffs)) if diffs else 0, 100)
-        if   final_score > 10: result = "Peinture homogene (OK)"
+        if   final_score > 28: result = "Peinture homogene (OK)"
         elif final_score < 28: result = "Legeres variations detectees"
         else:                  result = "Difference importante - repeinture probable"
 
