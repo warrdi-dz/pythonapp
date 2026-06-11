@@ -561,9 +561,9 @@ def analyse():
 
         diffs       = [z["diff"] for z in results_zones if z["diff"] > 0]
         final_score = min(int(np.mean(diffs)) if diffs else 0, 100)
-        if   final_score > 8: result = "Peinture homogene (OK)"
+        if   final_score < 18: result = "Peinture homogene (OK)"
         elif final_score < 28: result = "Legeres variations detectees"
-        else:                  result = "Difference importante - repeinture probable"
+        else:                  result = "Difference importante - repeintur probable"
 
         analysed_name = "analysed_" + filename
         cv2.imwrite(os.path.join(UPLOAD_FOLDER, analysed_name), final_img)
