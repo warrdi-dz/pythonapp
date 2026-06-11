@@ -500,16 +500,16 @@ def analyse():
                 )
 
                 if   verdict_state == "refaite":
-                    color_rect = (0, 0, 255)
-                    verdict    = "Peinture refaite!"
+                    color_rect = (0, 165, 255)
+                    verdict    = "Peinture OK!"
                     detected  += 1
                 elif verdict_state == "suspecte":
-                    color_rect = (0, 165, 255)
-                    verdict    = "Variation suspecte"
+                    color_rect =  (0, 210, 0)
+                    verdict    = "Variation refait"
                     detected  += 1
                 else:
-                    color_rect = (0, 210, 0)
-                    verdict    = "OK"
+                    color_rect = (0, 0, 255)
+                    verdict    = "susp"
 
                 # Étiquette : diff brute + score normalisé
                 label_score = f"E:{int(diff_raw)} N:{score_norm:.2f}"
