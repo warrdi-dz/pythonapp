@@ -528,7 +528,7 @@ def analyse():
             cv2.circle(final_img, (cx, cy), radius, (255, 255, 255), 2)
             num_txt = str(idx)
             (tw, th), _ = cv2.getTextSize(num_txt, cv2.FONT_HERSHEY_SIMPLEX, font_big * 1.3, font_thick + 1)
-            cv2.putText(final_img, num_txt, (cx - tw // 2, cy + th // 2),
+            cv2.putText(final_img, num_txt, (cx - tw // 2, cy + th //2),
                         cv2.FONT_HERSHEY_SIMPLEX, font_big * 1.3,
                         (255, 255, 255), font_thick + 1)
 
