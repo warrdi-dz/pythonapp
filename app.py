@@ -66,7 +66,7 @@ def build_body_mask(car_crop, hsv_full):
     h_c, w_c = car_crop.shape[:2]
 
     # Masque de base
-    mask_dark = cv2.inRange(hsv_full, (0, 0,   0), (180, 255,  50))
+    mask_dark = cv2.inRange(hsv_full, (0, 0,   0), (180, 255, 50))
     mask_refl = cv2.inRange(hsv_full, (0, 0, 215), (180, 255, 255))
     mask_sky  = cv2.inRange(hsv_full, (0, 0, 210), (180,  20, 255))
     exclude   = cv2.bitwise_or(mask_dark, mask_refl)
