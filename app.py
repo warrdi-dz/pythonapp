@@ -110,35 +110,61 @@ def classify_body_color(ref_hsv):
     return "bleu ciel"
 
 
-def compare_zone_to_body(zone_hsv, ref_hsv, color_name):
-    profile = COLOR_PROFILES[color_name]
+# =========================
+# SEUILS MODIFIABLES
+# =========================
+
+ECART_OK = 10.0           # > 10 = OK (vert)
+
+ECART_REPAINT_MIN = 2.6   # debut rouge
+ECART_REPAINT_MAX = 10.0  # fin rouge
+
+ECART_SUSPECT_MIN = 0.0
+ECART_SUSPECT_MAX = 2.2
+
+DV_MIN = -16.0
+DV_MAX = 10.0
+
+
+def compare_zone_to_body(zone_hsv, ref_hsv, color_name=None):
+
     h, s, v = [float(x) for x in zone_hsv]
     rh, rs, rv = [float(x) for x in ref_hsv]
-    raw_h = abs(h - rh)
-    d_h = min(raw_h, 180.0 - raw_h)
+
+    # Ecart simple HSV
+    diff = float(np.linalg.norm(zone_hsv - ref_hsv))
+
+    d_h = h - rh
     d_s = s - rs
     d_v = v - rv
-    score = float(np.sqrt(
-        (d_h * profile["h"]) ** 2 +
-        (d_s * profile["s"]) ** 2 +
-        (d_v * profile["v"]) ** 2
-    ))
 
-    # Le gris metallise produit naturellement plus d'ombres et de reflets.
     reflection = False
-    if color_name == "gris metallise":
-        light_limit = profile["shadow_v"] if d_v < 0 else profile["highlight_v"]
-        reflection = abs(d_v) <= light_limit and abs(d_s) <= 18.0 and d_h <= 9.0
-        if reflection:
-            score *= 0.48
 
-    if score >= profile["repaint"]:
+    # -------------------
+    # OK DIRECT
+    # -------------------
+    if diff > ECART_OK:
+        verdict = "OK"
+
+    # -------------------
+    # PEINTURE REFAITE
+    # -------------------
+    elif ECART_REPAINT_MIN <= diff <= ECART_REPAINT_MAX and DV_MIN < d_v < DV_MAX:
         verdict = "Peinture refaite!"
-    elif score >= profile["suspect"]:
+
+    # -------------------
+    # SUSPECT
+    # -------------------
+    elif ECART_SUSPECT_MIN <= diff < ECART_SUSPECT_MAX and DV_MIN < d_v < DV_MAX:
         verdict = "Variation suspecte"
+
+    # -------------------
+    # AUTRE = OK
+    # -------------------
     else:
         verdict = "OK"
-    return score, verdict, d_h, d_s, d_v, reflection
+
+    return diff, verdict, d_h, d_s, d_v, reflection
 
 
 def refine_car_bbox(img, x1, y1, x2, y2):
