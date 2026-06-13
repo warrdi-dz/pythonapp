@@ -16,44 +16,9 @@ YOLO_W = 900
 YOLO_H = 500
 
 
-# ================================================================
-# SEUILS — MODIFIEZ CES VALEURS POUR CALIBRER LA DETECTION
-# ================================================================
-#
-# LOGIQUE GENERALE (valable pour toutes les couleurs) :
-#
-#   ecart = distance HSV entre la zone et la reference globale
-#   dV    = difference de luminosite V (zone - reference)
-#           valeur negative = zone plus sombre
-#           valeur positive = zone plus claire
-#
-#   REGLE 1 : ecart >= SEUIL_VERT  → VERT directement (pas de repeinture)
-#   REGLE 2 : SEUIL_ROUGE_MIN <= ecart < SEUIL_VERT
-#             ET DV_MIN < dV < DV_MAX
-#             → ROUGE (peinture refaite)
-#   REGLE 3 : ecart < SEUIL_ROUGE_MIN (0 a 2.2)
-#             ET DV_MIN < dV < DV_MAX
-#             → ORANGE (variation suspecte)
-#   SINON   → VERT (OK)
-#
-# VOTRE CALIBRATION :
-#   SEUIL_VERT      = 10.0  (ecart > 10 → vert direct)
-#   SEUIL_ROUGE_MIN = 2.6   (ecart >= 2.6 → potentiellement rouge)
-#   SEUIL_SUSPECT_MAX = 2.2 (ecart < 2.2 → potentiellement suspect)
-#   DV_MIN          = -16.0 (dV > -16 requis pour rouge/suspect)
-#   DV_MAX          = 10.0  (dV < 10  requis pour rouge/suspect)
-#
-# ================================================================
-
-SEUIL_VERT       = 10.0   # ecart > cette valeur → VERT directement
-SEUIL_ROUGE_MIN  =  2.6   # ecart >= cette valeur → candidat ROUGE
-SEUIL_SUSPECT_MAX =  2.2  # ecart < cette valeur  → candidat SUSPECT
-DV_MIN           = -16.0  # dV doit etre SUPERIEUR a cette valeur
-DV_MAX           =  10.0  # dV doit etre INFERIEUR a cette valeur
-
-# ================================================================
-
-
+# =========================
+# YOLO API CALL
+# =========================
 def call_yolo(image_path):
     url = "https://warrdi.com/pytho/detect"
     try:
@@ -96,92 +61,111 @@ def uploads(filename):
 
 @app.route("/")
 def home():
-    return jsonify({"status": "OK", "message": "GARAGE PRO V16"})
+    return jsonify({"status": "OK", "message": "GARAGE PRO V15 - PROFILS PAR COULEUR"})
 
 
 # =========================
-# COULEUR MEDIANE D'UNE ZONE
+# COULEUR MEDIANE D'UNE ZONE DE TOLE
 # =========================
 def get_poly_color(hsv_img, body_mask, polygon):
-    h, w      = hsv_img.shape[:2]
+    h, w = hsv_img.shape[:2]
     poly_mask = np.zeros((h, w), dtype=np.uint8)
     cv2.fillPoly(poly_mask, [np.array(polygon, dtype=np.int32)], 255)
-    combined  = cv2.bitwise_and(poly_mask, body_mask)
-    valid     = hsv_img[combined > 0]
+    combined = cv2.bitwise_and(poly_mask, body_mask)
+    valid = hsv_img[combined > 0]
     if len(valid) < 80:
         return None, 0
-    return np.array([
+    med = np.array([
         float(np.median(valid[:, 0])),
         float(np.median(valid[:, 1])),
         float(np.median(valid[:, 2]))
-    ]), len(valid)
+    ])
+    return med, len(valid)
 
 
-# ================================================================
-# CALCUL DE L'ECART ET DU VERDICT
-#
-# ecart = distance HSV ponderee entre la zone et la reference
-#   - On utilise les poids : H x0.5, S x0.3, V x0.4
-#     (V compte car une repeinture change souvent la brillance)
-#
-# dV = zone_V - ref_V  (negatif = zone plus sombre)
-#
-# DECISION (les 3 conditions de vos seuils) :
-#
-#   SI ecart > SEUIL_VERT (10.0)
-#       → VERT  (ecart trop grand = bruit ou fond, pas de peinture)
-#
-#   SI SEUIL_ROUGE_MIN (2.6) <= ecart < SEUIL_VERT (10.0)
-#     ET DV_MIN (-16) < dV < DV_MAX (10)
-#       → ROUGE (peinture refaite)
-#
-#   SI ecart < SEUIL_SUSPECT_MAX (2.2)
-#     ET DV_MIN (-16) < dV < DV_MAX (10)
-#       → ORANGE (variation suspecte)
-#
-#   SINON → VERT (OK)
-# ================================================================
-def compute_verdict(zone_hsv, ref_hsv):
-    """
-    Calcule l'ecart et applique les seuils.
-    Retourne : (ecart, dV, verdict, couleur_rect)
-    """
-    H_z, S_z, V_z = float(zone_hsv[0]), float(zone_hsv[1]), float(zone_hsv[2])
-    H_r, S_r, V_r = float(ref_hsv[0]),  float(ref_hsv[1]),  float(ref_hsv[2])
+# Seuils calibres par couleur pour une distance HSV ponderee.
+COLOR_PROFILES = {
+    "gris metallise": {"h": 0.15, "s": 0.30, "v": 0.45, "suspect": 16.0, "repaint": 27.0,
+                       "shadow_v": 42.0, "highlight_v": 48.0},
+    "blanc":          {"h": 0.05, "s": 0.25, "v": 0.75, "suspect": 11.0, "repaint": 20.0},
+    "noir":           {"h": 0.05, "s": 0.20, "v": 0.55, "suspect": 14.0, "repaint": 26.0},
+    "rouge":          {"h": 1.00, "s": 0.38, "v": 0.48, "suspect": 14.0, "repaint": 25.0},
+    "bleu ciel":      {"h": 0.90, "s": 0.42, "v": 0.52, "suspect": 14.0, "repaint": 25.0},
+}
 
-    # Ecart de teinte (circulaire)
-    dH = abs(H_z - H_r)
-    dH = min(dH, 180.0 - dH)
 
-    dS = S_z - S_r
-    dV = V_z - V_r
+def classify_body_color(ref_hsv):
+    """Classe la couleur globale a partir du HSV OpenCV (H: 0..180)."""
+    h, s, v = [float(x) for x in ref_hsv]
+    if v <= 75:
+        return "noir"
+    if s <= 28 and v >= 170:
+        return "blanc"
+    if s <= 55:
+        return "gris metallise"
+    if h <= 12 or h >= 168:
+        return "rouge"
+    if 82 <= h <= 112 and v >= 105:
+        return "bleu ciel"
+    return "bleu ciel"
 
-    # Distance HSV ponderee
-    ecart = float(np.sqrt(
-        (dH * 0.5) ** 2 +
-        (dS * 0.3) ** 2 +
-        (dV * 0.4) ** 2
-    ))
 
-    # ---- APPLICATION DES SEUILS ----
+# =========================
+# SEUILS MODIFIABLES
+# =========================
 
-    # REGLE 1 : ecart > SEUIL_VERT → VERT direct (bruit/fond)
-    if ecart > SEUIL_VERT:
-        return ecart, dV, "OK", (0, 210, 0)
+ECART_OK = 24.0           # > 10 = OK (vert)
 
-    # Condition commune sur dV pour les regles 2 et 3
-    dv_in_range = (dV > DV_MIN) and (dV < DV_MAX)
+ECART_REPAINT_MIN = 12.2   # debut rouge
+ECART_REPAINT_MAX = 24.0  # fin rouge
 
-    # REGLE 2 : ecart dans la plage rouge + dV dans la plage
-    if SEUIL_ROUGE_MIN <= ecart and dv_in_range:
-        return ecart, dV, "Peinture refaite!", (0, 0, 255)
+ECART_SUSPECT_MIN = 0.0
+ECART_SUSPECT_MAX = 2.2
 
-    # REGLE 3 : ecart < seuil suspect + dV dans la plage
-    if ecart < SEUIL_SUSPECT_MAX and dv_in_range:
-        return ecart, dV, "Variation suspecte", (0, 165, 255)
+DV_MIN = -90
+DV_MAX = 11
 
-    # SINON : OK
-    return ecart, dV, "OK", (0, 210, 0)
+DS_MIN=10 
+DS_MAX=18
+def compare_zone_to_body(zone_hsv, ref_hsv, color_name=None):
+
+    h, s, v = [float(x) for x in zone_hsv]
+    rh, rs, rv = [float(x) for x in ref_hsv]
+
+    # Ecart simple HSV
+    diff = float(np.linalg.norm(zone_hsv - ref_hsv))
+
+    d_h = h - rh
+    d_s = s - rs
+    d_v = v - rv
+
+    reflection = False
+
+    # -------------------
+    # OK DIRECT
+    # -------------------
+    if diff > ECART_OK:
+        verdict = "OK"
+
+    # -------------------
+    # PEINTURE REFAITE
+    # -------------------
+    elif ECART_REPAINT_MIN <= diff <= ECART_REPAINT_MAX and DV_MIN < d_v < DV_MAX and DS_MIN<d_s<DS_MAX :
+        verdict = "Peinture refaite!"
+
+    # -------------------
+    # SUSPECT
+    # -------------------
+    elif ECART_SUSPECT_MIN <= diff < ECART_SUSPECT_MAX and DV_MIN < d_v < DV_MAX and DS_MIN<d_s<DS_MAX :
+        verdict = "Variation suspecte"
+
+    # -------------------
+    # AUTRE = OK
+    # -------------------
+    else:
+        verdict = "OK"
+
+    return diff, verdict, d_h, d_s, d_v, reflection
 
 
 def refine_car_bbox(img, x1, y1, x2, y2):
@@ -194,24 +178,28 @@ def refine_car_bbox(img, x1, y1, x2, y2):
     mask_valid = cv2.bitwise_not(cv2.bitwise_or(mask_dark, mask_sky))
     k          = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
     mask_valid = cv2.morphologyEx(mask_valid, cv2.MORPH_CLOSE, k, iterations=2)
-    col_sum = np.convolve(mask_valid.sum(axis=0).astype(float), np.ones(15)/15, mode='same')
-    row_sum = np.convolve(mask_valid.sum(axis=1).astype(float), np.ones(15)/15, mode='same')
-    vc = np.where(col_sum > col_sum.max() * 0.08)[0]
-    vr = np.where(row_sum > row_sum.max() * 0.08)[0]
-    if len(vc) < 20 or len(vr) < 20:
+    col_sum = mask_valid.sum(axis=0).astype(float)
+    row_sum = mask_valid.sum(axis=1).astype(float)
+    col_sum = np.convolve(col_sum, np.ones(15) / 15, mode='same')
+    row_sum = np.convolve(row_sum, np.ones(15) / 15, mode='same')
+    col_thresh = col_sum.max() * 0.08
+    row_thresh = row_sum.max() * 0.08
+    valid_cols = np.where(col_sum > col_thresh)[0]
+    valid_rows = np.where(row_sum > row_thresh)[0]
+    if len(valid_cols) < 20 or len(valid_rows) < 20:
         return x1, y1, x2, y2
-    PAD    = 8
-    new_x1 = max(0,            x1 + int(vc[0])  - PAD)
-    new_x2 = min(img.shape[1], x1 + int(vc[-1]) + PAD)
-    new_y1 = max(0,            y1 + int(vr[0])  - PAD)
-    new_y2 = min(img.shape[0], y1 + int(vr[-1]) + PAD)
+    PAD = 8
+    new_x1 = max(0,            x1 + int(valid_cols[0])  - PAD)
+    new_x2 = min(img.shape[1], x1 + int(valid_cols[-1]) + PAD)
+    new_y1 = max(0,            y1 + int(valid_rows[0])  - PAD)
+    new_y2 = min(img.shape[0], y1 + int(valid_rows[-1]) + PAD)
     if (new_x2 - new_x1) < 100 or (new_y2 - new_y1) < 80:
         return x1, y1, x2, y2
     return new_x1, new_y1, new_x2, new_y2
 
 
 def detect_lights(car_crop):
-    h, w    = car_crop.shape[:2]
+    h, w = car_crop.shape[:2]
     band_w  = int(w * 0.28)
     feux_y1 = int(h * 0.40)
     feux_y2 = int(h * 0.78)
@@ -227,7 +215,7 @@ def detect_lights(car_crop):
         white  = cv2.inRange(hsv, (0, 0, 210), (180, 60, 255))
         yellow = cv2.inRange(hsv, (18, 130, 190), (35, 255, 255))
         return int(cv2.countNonZero(cv2.bitwise_or(white, yellow)))
-    rl = count_red(left_hsv);   rr = count_red(right_hsv)
+    rl = count_red(left_hsv); rr = count_red(right_hsv)
     wl = count_white(left_hsv); wr = count_white(right_hsv)
     band_area = band_w * (feux_y2 - feux_y1)
     return {
@@ -244,43 +232,49 @@ def detect_lights(car_crop):
 
 def detect_front_rear(lights):
     log = []
-    rl, rr    = lights["red_left"],   lights["red_right"]
-    wl, wr    = lights["white_left"], lights["white_right"]
+    rl, rr = lights["red_left"], lights["red_right"]
+    wl, wr = lights["white_left"], lights["white_right"]
     red_tot   = rl + rr
     white_tot = wl + wr
     band_area = lights["band_area"]
     red_thr   = max(120, int(band_area * 0.003))
     white_thr = max(400, int(band_area * 0.020))
     if red_tot >= red_thr:
-        facing = "rear";  log.append(f"REAR rouge={red_tot}>={red_thr}")
+        facing = "rear"; log.append(f"facing=REAR (rouge tot={red_tot} >= {red_thr})")
     elif white_tot >= white_thr and white_tot > red_tot * 3:
-        facing = "front"; log.append(f"FRONT blanc={white_tot}")
+        facing = "front"; log.append(f"facing=FRONT (blanc tot={white_tot})")
     else:
-        facing = "side";  log.append(f"SIDE R={red_tot} W={white_tot}")
+        facing = "side"; log.append(f"facing=SIDE (R={red_tot} W={white_tot})")
     rear_side  = "left" if rl > rr * 1.25 else ("right" if rr > rl * 1.25 else None)
     front_side = "left" if wl > wr * 1.25 else ("right" if wr > wl * 1.25 else None)
-    if rear_side  and not front_side: front_side = "right" if rear_side  == "left" else "left"
-    if front_side and not rear_side:  rear_side  = "right" if front_side == "left" else "left"
+    if rear_side and not front_side:
+        front_side = "right" if rear_side == "left" else "left"
+    if front_side and not rear_side:
+        rear_side = "right" if front_side == "left" else "left"
     if not rear_side and not front_side:
         rear_side, front_side = "right", "left"
         log.append("Fallback: arriere=droite")
+    log.append(f"R G={rl} D={rr} | W G={wl} D={wr}")
     log.append(f"rear={rear_side} front={front_side}")
     return rear_side, front_side, facing, log
 
 
 def estimate_angle(lights, crop_w, crop_h, facing):
-    rl, rr = lights["red_left"],   lights["red_right"]
+    rl, rr = lights["red_left"], lights["red_right"]
     wl, wr = lights["white_left"], lights["white_right"]
-    if   facing == "rear":  big = max(rl, rr); sml = min(rl, rr)
-    elif facing == "front": big = max(wl, wr); sml = min(wl, wr)
-    else:                   big = max(rl+wl, rr+wr); sml = min(rl+wl, rr+wr)
+    if facing == "rear":
+        big = max(rl, rr); sml = min(rl, rr)
+    elif facing == "front":
+        big = max(wl, wr); sml = min(wl, wr)
+    else:
+        big = max(rl + wl, rr + wr); sml = min(rl + wl, rr + wr)
     if big == 0: return 45.0
-    sym = big / max(sml, 1)
-    if   sym >= 8.0: angle = 10.0
-    elif sym >= 4.0: angle = 10.0 + (8.0 - sym) / 4.0 * 30.0
-    elif sym >= 2.0: angle = 40.0 + (4.0 - sym) / 2.0 * 25.0
-    elif sym >= 1.3: angle = 65.0 + (2.0 - sym) / 0.7 * 20.0
-    else:            angle = 87.0
+    sym_ratio = big / max(sml, 1)
+    if sym_ratio >= 8.0: angle = 10.0
+    elif sym_ratio >= 4.0: angle = 10.0 + (8.0 - sym_ratio) / 4.0 * 30.0
+    elif sym_ratio >= 2.0: angle = 40.0 + (4.0 - sym_ratio) / 2.0 * 25.0
+    elif sym_ratio >= 1.3: angle = 65.0 + (2.0 - sym_ratio) / 0.7 * 20.0
+    else: angle = 87.0
     ratio_wh = crop_w / max(crop_h, 1)
     if ratio_wh > 1.6: angle = min(angle, 35.0)
     elif ratio_wh < 0.9: angle = max(angle, 60.0)
@@ -304,66 +298,67 @@ def make_poly(crop_w, crop_h, xA, xB, top_base, bot_base, persp, tilt_dir):
 
 
 def build_zones(crop_w, crop_h, angle, rear_side, front_side, facing, lights):
-    rl, rr = lights["red_left"],   lights["red_right"]
+    rl, rr = lights["red_left"], lights["red_right"]
     wl, wr = lights["white_left"], lights["white_right"]
-    if   facing == "rear":  near_side = "left" if rl > rr else "right"
-    elif facing == "front": near_side = "left" if wl > wr else "right"
-    else:                   near_side = "left" if (rl+wl) > (rr+wr) else "right"
+    if facing == "rear":
+        near_side = "left" if rl > rr else "right"
+    elif facing == "front":
+        near_side = "left" if wl > wr else "right"
+    else:
+        near_side = "left" if (rl+wl) > (rr+wr) else "right"
     far_side = "right" if near_side == "left" else "left"
-    if   angle <= 10: persp = 0.0
+    if angle <= 10: persp = 0.0
     elif angle <= 55: persp = 0.6 * min(1.0, (angle - 10) / 45.0)
     elif angle <= 80: persp = 0.6 * max(0.0, 1.0 - (angle - 55) / 25.0)
-    else:             persp = 0.0
+    else: persp = 0.0
     tilt_dir = +1 if far_side == "right" else -1
-    top_base, bot_base = 0.20, 0.88
+    top_base = 0.20; bot_base = 0.88
     is_rear  = (facing == "rear") or (facing == "side" and (rl + rr) >= (wl + wr))
     panel    = "Coffre"     if is_rear else "Capot"
     pc_label = "Pare-ch.AR" if is_rear else "Pare-ch.AV"
     def zone(name, a, b):
-        return {"name": name, "poly": make_poly(
-            crop_w, crop_h, int(a*crop_w), int(b*crop_w),
-            top_base, bot_base, persp, tilt_dir
-        )}
+        return {"name": name, "poly": make_poly(crop_w, crop_h, int(a*crop_w), int(b*crop_w), top_base, bot_base, persp, tilt_dir)}
+    log_label = ""
     if angle <= 25:
-        log = f"PROFIL ({angle}°) near={near_side} {'AR' if is_rear else 'AV'}"
+        log_label = f"PROFIL ({angle}°) near={near_side} {'AR' if is_rear else 'AV'}"
         if near_side == "right":
-            return ([zone("Aile AV",0.00,0.20), zone("Porte AV",0.20,0.48),
-                     zone("Porte AR",0.48,0.78), zone("Aile AR",0.78,1.00)]
-                    if is_rear else
-                    [zone("Aile AR",0.00,0.20), zone("Porte AR",0.20,0.48),
-                     zone("Porte AV",0.48,0.78), zone("Aile AV",0.78,1.00)]), log
-        return ([zone("Aile AR",0.00,0.22), zone("Porte AR",0.22,0.52),
-                 zone("Porte AV",0.52,0.80), zone("Aile AV",0.80,1.00)]
-                if is_rear else
-                [zone("Aile AV",0.00,0.22), zone("Porte AV",0.22,0.52),
-                 zone("Porte AR",0.52,0.80), zone("Aile AR",0.80,1.00)]), log
-    elif angle <= 55:
-        log = f"3/4 LEGER ({angle}°) near={near_side}"
-        if near_side == "right":
-            return ([zone("Porte AV",0.00,0.22), zone("Porte AR",0.22,0.50),
-                     zone("Aile AR",0.50,0.72), zone(pc_label,0.72,1.00)]
-                    if is_rear else
-                    [zone("Porte AR",0.00,0.22), zone("Porte AV",0.22,0.50),
-                     zone("Aile AV",0.50,0.72), zone(pc_label,0.72,1.00)]), log
-        return ([zone(pc_label,0.00,0.28), zone("Aile AR",0.28,0.50),
-                 zone("Porte AR",0.50,0.78), zone("Porte AV",0.78,1.00)]
-                if is_rear else
-                [zone(pc_label,0.00,0.28), zone("Aile AV",0.28,0.50),
-                 zone("Porte AV",0.50,0.78), zone("Porte AR",0.78,1.00)]), log
-    elif angle <= 80:
-        log = f"3/4 MARQUE ({angle}°) near={near_side}"
-        if near_side == "right":
-            return [zone("Aile AR" if is_rear else "Aile AV", 0.42, 0.68),
-                    zone(panel, 0.68, 0.85), zone(pc_label, 0.85, 1.00)], log
-        return [zone(pc_label, 0.00, 0.15), zone(panel, 0.15, 0.32),
-                zone("Aile AR" if is_rear else "Aile AV", 0.32, 0.58)], log
-    else:
-        log = f"FACE/DOS ({angle}°)"
+            if is_rear:
+                return [zone("Aile AV",0.00,0.20),zone("Porte AV",0.20,0.48),
+                        zone("Porte AR",0.48,0.78),zone("Aile AR",0.78,1.00)], log_label
+            return [zone("Aile AR",0.00,0.20),zone("Porte AR",0.20,0.48),
+                    zone("Porte AV",0.48,0.78),zone("Aile AV",0.78,1.00)], log_label
         if is_rear:
-            return [zone("Aile AR G", 0.00, 0.20), zone(pc_label, 0.20, 0.55),
-                    zone(panel, 0.45, 0.80), zone("Aile AR D", 0.80, 1.00)], log
-        return [zone("Aile AV G", 0.00, 0.20), zone(pc_label, 0.20, 0.55),
-                zone(panel, 0.45, 0.80), zone("Aile AV D", 0.80, 1.00)], log
+            return [zone("Aile AR",0.00,0.22),zone("Porte AR",0.22,0.52),
+                    zone("Porte AV",0.52,0.80),zone("Aile AV",0.80,1.00)], log_label
+        return [zone("Aile AV",0.00,0.22),zone("Porte AV",0.22,0.52),
+                zone("Porte AR",0.52,0.80),zone("Aile AR",0.80,1.00)], log_label
+    elif angle <= 55:
+        log_label = f"3/4 LEGER ({angle}°)"
+        if near_side == "right":
+            if is_rear:
+                return [zone("Porte AV",0.00,0.22),zone("Porte AR",0.22,0.50),
+                        zone("Aile AR",0.50,0.72),zone(pc_label,0.72,1.00)], log_label
+            return [zone("Porte AR",0.00,0.22),zone("Porte AV",0.22,0.50),
+                    zone("Aile AV",0.50,0.72),zone(pc_label,0.72,1.00)], log_label
+        if is_rear:
+            return [zone(pc_label,0.00,0.28),zone("Aile AR",0.28,0.50),
+                    zone("Porte AR",0.50,0.78),zone("Porte AV",0.78,1.00)], log_label
+        return [zone(pc_label,0.00,0.28),zone("Aile AV",0.28,0.50),
+                zone("Porte AV",0.50,0.78),zone("Porte AR",0.78,1.00)], log_label
+    elif angle <= 80:
+        log_label = f"3/4 MARQUE ({angle}°)"
+        if near_side == "right":
+            return [zone("Aile AR" if is_rear else "Aile AV",0.42,0.68),
+                    zone(panel,0.68,0.85),zone(pc_label,0.85,1.00)], log_label
+        return [zone(pc_label,0.00,0.15),zone(panel,0.15,0.32),
+                zone("Aile AR" if is_rear else "Aile AV",0.32,0.58)], log_label
+    else:
+        log_label = f"FACE/DOS ({angle}°)"
+        if is_rear:
+            return [zone("Aile AR G",0.00,0.20),zone(pc_label,0.20,0.55),
+                    zone(panel,0.45,0.80),zone("Aile AR D",0.80,1.00)], log_label
+        return [zone("Aile AV G",0.00,0.20),zone(pc_label,0.20,0.55),
+                zone(panel,0.45,0.80),zone("Aile AV D",0.80,1.00)], log_label
 
 
 @app.route("/analyse", methods=["POST"])
@@ -371,7 +366,6 @@ def analyse():
     try:
         if "image" not in request.files:
             return jsonify({"error": "no image"}), 400
-
         file     = request.files["image"]
         filename = str(int(time.time())) + "_" + secure_filename(file.filename)
         path     = os.path.join(UPLOAD_FOLDER, filename)
@@ -432,21 +426,22 @@ def analyse():
         kernel    = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
         mask_body = cv2.morphologyEx(mask_body, cv2.MORPH_CLOSE, kernel)
 
+        # Reference = mediane HSV de toute la carrosserie valide.
         all_valid = hsv_full[mask_body > 0]
         if len(all_valid) < 100:
             return jsonify({"error": "No body pixels found"}), 400
-
         ref_color = np.array([
             float(np.median(all_valid[:, 0])),
             float(np.median(all_valid[:, 1])),
             float(np.median(all_valid[:, 2]))
         ])
         ref_H, ref_S, ref_V = ref_color
-
-        fr_log.append(f"REF: H={ref_H:.0f} S={ref_S:.0f} V={ref_V:.0f}")
+        body_color = classify_body_color(ref_color)
+        color_profile = COLOR_PROFILES[body_color]
+        fr_log.append(f"MOYENNE GLOBALE: H={ref_H:.0f} S={ref_S:.0f} V={ref_V:.0f}")
         fr_log.append(
-            f"SEUILS: vert>{SEUIL_VERT} rouge>={SEUIL_ROUGE_MIN} "
-            f"suspect<{SEUIL_SUSPECT_MAX} dV({DV_MIN},{DV_MAX})"
+            f"COULEUR={body_color} seuil suspect={color_profile['suspect']:.0f} "
+            f"repeinte={color_profile['repaint']:.0f}"
         )
 
         final_img  = img_orig.copy()
@@ -458,15 +453,12 @@ def analyse():
 
         cv2.rectangle(final_img, (x1, y1), (x2, y2), (220, 220, 220), thick_line)
 
-        header = (
-            f"{car_info['make']} {car_info['model']} | "
-            f"{'AR' if facing=='rear' else ('AV' if facing=='front' else 'COTE')} | "
-            f"{angle}° | Ref H{int(ref_H)} S{int(ref_S)} V{int(ref_V)}"
-        )
+        header = f"{car_info['make']} {car_info['model']} | {body_color.upper()} | {'AR' if facing=='rear' else ('AV' if facing=='front' else 'COTE')} | {angle}° | Ref H{int(ref_H)} S{int(ref_S)} V{int(ref_V)}"
         (hw, hh), _ = cv2.getTextSize(header, cv2.FONT_HERSHEY_SIMPLEX, font_med * 1.2, font_thick)
         cv2.rectangle(final_img, (5, 5), (15 + hw, 20 + hh), (0, 0, 0), -1)
         cv2.putText(final_img, header, (10, 15 + hh),
-                    cv2.FONT_HERSHEY_SIMPLEX, font_med * 1.2, (255, 255, 255), font_thick)
+                    cv2.FONT_HERSHEY_SIMPLEX, font_med * 1.2,
+                    (255, 255, 255), font_thick)
 
         results_zones = []
         detected = 0
@@ -480,70 +472,65 @@ def analyse():
             zone_color, px_count = get_poly_color(hsv_full, mask_body, poly_local)
 
             if zone_color is None:
-                color_rect = (150, 150, 150)
-                label_score = "N/A"
-                ecart = 0.0
-                dV    = 0.0
-                verdict = "Non analysable"
+                color_rect, label_score, verdict = (150,150,150), "N/A", "Non analysable"
+                diff = 0.0
+                d_h = d_s = d_v = 0.0
+                reflection = False
             else:
-                ecart, dV, verdict, color_rect = compute_verdict(zone_color, ref_color)
-
+                diff, verdict, d_h, d_s, d_v, reflection = compare_zone_to_body(
+                    zone_color, ref_color, body_color
+                )
                 if verdict == "Peinture refaite!":
+                    color_rect, verdict = (0, 0, 255), "Peinture refaite!"
                     detected += 1
                 elif verdict == "Variation suspecte":
-                    detected += 1
+                    color_rect, verdict = (0, 165, 255), "Variation suspecte"
+                else:
+                    color_rect, verdict = (0, 210, 0), "OK"
+                label_score = f"{int(diff)} dV{d_v:+.0f}"
 
-                # Etiquette affichee sur l'image
-                label_score = f"E:{ecart:.1f} dV:{dV:+.0f}"
-
-            # Dessin du polygone
             overlay = final_img.copy()
             cv2.fillPoly(overlay, [poly_global], color_rect)
             cv2.addWeighted(overlay, 0.22, final_img, 0.78, 0, final_img)
             cv2.polylines(final_img, [poly_global], True, color_rect, thick_box)
 
-            # Cercle numero
             cx = int(np.mean(poly_global[:, 0]))
             cy = int(np.mean(poly_global[:, 1]))
-            r  = max(18, int(20 * min(scale_x, scale_y)))
-            cv2.circle(final_img, (cx + 2, cy + 2), r, (0, 0, 0), -1)
-            cv2.circle(final_img, (cx, cy),         r, color_rect, -1)
-            cv2.circle(final_img, (cx, cy),         r, (255, 255, 255), 2)
-            ntxt = str(idx)
-            (tw, th), _ = cv2.getTextSize(ntxt, cv2.FONT_HERSHEY_SIMPLEX, font_big * 1.3, font_thick + 1)
-            cv2.putText(final_img, ntxt, (cx - tw // 2, cy + th // 2),
-                        cv2.FONT_HERSHEY_SIMPLEX, font_big * 1.3, (255, 255, 255), font_thick + 1)
+            radius = max(18, int(20 * min(scale_x, scale_y)))
+            cv2.circle(final_img, (cx + 2, cy + 2), radius, (0, 0, 0), -1)
+            cv2.circle(final_img, (cx, cy), radius, color_rect, -1)
+            cv2.circle(final_img, (cx, cy), radius, (255, 255, 255), 2)
+            num_txt = str(idx)
+            (tw, th), _ = cv2.getTextSize(num_txt, cv2.FONT_HERSHEY_SIMPLEX, font_big * 1.3, font_thick + 1)
+            cv2.putText(final_img, num_txt, (cx - tw // 2, cy + th // 2),
+                        cv2.FONT_HERSHEY_SIMPLEX, font_big * 1.3,
+                        (255, 255, 255), font_thick + 1)
 
-            # Etiquette
             top_pt = poly_global[poly_global[:, 1].argmin()]
             lbl_x  = max(5, int(top_pt[0]))
             lbl_y  = max(20, int(top_pt[1]) - 10)
-            lbl    = f"{idx}. {zone['name']}  {label_score}"
-            (lw, lh), _ = cv2.getTextSize(lbl, cv2.FONT_HERSHEY_SIMPLEX, font_med, font_thick)
+            label_full = f"{idx}. {zone['name']}  {label_score}"
+            (lw, lh), _ = cv2.getTextSize(label_full, cv2.FONT_HERSHEY_SIMPLEX, font_med, font_thick)
             lbl_x = min(lbl_x, orig_w - lw - 10)
-            cv2.rectangle(final_img,
-                          (lbl_x - 4, lbl_y - lh - 6), (lbl_x + lw + 6, lbl_y + 4),
-                          (0, 0, 0), -1)
-            cv2.putText(final_img, lbl, (lbl_x, lbl_y),
-                        cv2.FONT_HERSHEY_SIMPLEX, font_med, (255, 255, 255), font_thick)
+            cv2.rectangle(final_img, (lbl_x - 4, lbl_y - lh - 6),
+                          (lbl_x + lw + 6, lbl_y + 4), (0, 0, 0), -1)
+            cv2.putText(final_img, label_full, (lbl_x, lbl_y),
+                        cv2.FONT_HERSHEY_SIMPLEX, font_med,
+                        (255, 255, 255), font_thick)
 
             results_zones.append({
-                "idx":     idx,
-                "zone":    zone["name"],
-                "ecart":   round(ecart, 2),
-                "diff_v":  round(dV, 1),
-                "pixels":  px_count,
-                "verdict": verdict,
+                "idx": idx, "zone": zone["name"], "diff": round(diff, 1),
+                "diff_h": round(d_h, 1), "diff_s": round(d_s, 1),
+                "diff_v": round(d_v, 1), "reflection_or_shadow": reflection,
+                "pixels": px_count, "verdict": verdict,
                 "polygon": poly_global.tolist()
             })
 
-        # Score global
-        ecarts      = [z["ecart"] for z in results_zones if 0 < z["ecart"] <= SEUIL_VERT]
-        final_score = min(int(np.mean(ecarts) * 8) if ecarts else 0, 100)
-
-        if   detected == 0:      result = "Peinture homogene (OK)"
-        elif detected == 1:      result = "Variation detectee - verification recommandee"
-        else:                    result = "Difference importante - repeinture probable"
+        diffs       = [z["diff"] for z in results_zones if z["diff"] > 0]
+        final_score = min(int(np.mean(diffs)) if diffs else 0, 100)
+        if   final_score < 10: result = "Peinture homogene (OK)"
+        elif final_score < 25: result = "Legeres variations detectees"
+        else:                  result = "Difference importante - repeinture probable"
 
         analysed_name = "analysed_" + filename
         cv2.imwrite(os.path.join(UPLOAD_FOLDER, analysed_name), final_img)
@@ -563,15 +550,15 @@ def analyse():
             "front_side":      front_side,
             "orientation_log": fr_log,
             "lights":          lights,
-            "seuils_appliques": {
-                "SEUIL_VERT":        SEUIL_VERT,
-                "SEUIL_ROUGE_MIN":   SEUIL_ROUGE_MIN,
-                "SEUIL_SUSPECT_MAX": SEUIL_SUSPECT_MAX,
-                "DV_MIN":            DV_MIN,
-                "DV_MAX":            DV_MAX,
-            },
             "image_size":      {"width": orig_w, "height": orig_h},
-            "reference_hsv":   {"H": round(ref_H, 1), "S": round(ref_S, 1), "V": round(ref_V, 1)},
+            "reference_hsv": {
+                "H": round(ref_H, 1), "S": round(ref_S, 1), "V": round(ref_V, 1)
+            },
+            "body_color": body_color,
+            "color_thresholds": {
+                "suspect": color_profile["suspect"],
+                "repaint": color_profile["repaint"]
+            },
             "image_result":    analysed_name,
             "image_url":       request.host_url + "uploads/" + analysed_name
         })
