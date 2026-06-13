@@ -114,16 +114,16 @@ def classify_body_color(ref_hsv):
 # SEUILS MODIFIABLES
 # =========================
 
-ECART_OK = 10.0           # > 10 = OK (vert)
+ECART_OK = 12.0           # > 10 = OK (vert)
 
-ECART_REPAINT_MIN = 2.6   # debut rouge
-ECART_REPAINT_MAX = 10.0  # fin rouge
+ECART_REPAINT_MIN = 12.2   # debut rouge
+ECART_REPAINT_MAX = 24.0  # fin rouge
 
 ECART_SUSPECT_MIN = 0.0
 ECART_SUSPECT_MAX = 2.2
 
 DV_MIN = -16.0
-DV_MAX = 10.0
+DV_MAX = 1
 
 
 def compare_zone_to_body(zone_hsv, ref_hsv, color_name=None):
