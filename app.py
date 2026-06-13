@@ -61,7 +61,7 @@ def uploads(filename):
 
 @app.route("/")
 def home():
-    return jsonify({"status": "OK", "message": "GARAGE PRO V14 - MOYENNE HSV"})
+    return jsonify({"status": "OK", "message": "GARAGE PRO V15 - PROFILS PAR COULEUR"})
 
 
 # =========================
@@ -81,6 +81,64 @@ def get_poly_color(hsv_img, body_mask, polygon):
         float(np.median(valid[:, 2]))
     ])
     return med, len(valid)
+
+
+# Seuils calibres par couleur pour une distance HSV ponderee.
+COLOR_PROFILES = {
+    "gris metallise": {"h": 0.15, "s": 0.30, "v": 0.45, "suspect": 16.0, "repaint": 27.0,
+                       "shadow_v": 42.0, "highlight_v": 48.0},
+    "blanc":          {"h": 0.05, "s": 0.25, "v": 0.75, "suspect": 11.0, "repaint": 20.0},
+    "noir":           {"h": 0.05, "s": 0.20, "v": 0.55, "suspect": 14.0, "repaint": 26.0},
+    "rouge":          {"h": 1.00, "s": 0.38, "v": 0.48, "suspect": 14.0, "repaint": 25.0},
+    "bleu ciel":      {"h": 0.90, "s": 0.42, "v": 0.52, "suspect": 14.0, "repaint": 25.0},
+}
+
+
+def classify_body_color(ref_hsv):
+    """Classe la couleur globale a partir du HSV OpenCV (H: 0..180)."""
+    h, s, v = [float(x) for x in ref_hsv]
+    if v <= 75:
+        return "noir"
+    if s <= 28 and v >= 170:
+        return "blanc"
+    if s <= 55:
+        return "gris metallise"
+    if h <= 12 or h >= 168:
+        return "rouge"
+    if 82 <= h <= 112 and v >= 105:
+        return "bleu ciel"
+    return "bleu ciel"
+
+
+def compare_zone_to_body(zone_hsv, ref_hsv, color_name):
+    profile = COLOR_PROFILES[color_name]
+    h, s, v = [float(x) for x in zone_hsv]
+    rh, rs, rv = [float(x) for x in ref_hsv]
+    raw_h = abs(h - rh)
+    d_h = min(raw_h, 180.0 - raw_h)
+    d_s = s - rs
+    d_v = v - rv
+    score = float(np.sqrt(
+        (d_h * profile["h"]) ** 2 +
+        (d_s * profile["s"]) ** 2 +
+        (d_v * profile["v"]) ** 2
+    ))
+
+    # Le gris metallise produit naturellement plus d'ombres et de reflets.
+    reflection = False
+    if color_name == "gris metallise":
+        light_limit = profile["shadow_v"] if d_v < 0 else profile["highlight_v"]
+        reflection = abs(d_v) <= light_limit and abs(d_s) <= 18.0 and d_h <= 9.0
+        if reflection:
+            score *= 0.48
+
+    if score >= profile["repaint"]:
+        verdict = "Peinture refaite!"
+    elif score >= profile["suspect"]:
+        verdict = "Variation suspecte"
+    else:
+        verdict = "OK"
+    return score, verdict, d_h, d_s, d_v, reflection
 
 
 def refine_car_bbox(img, x1, y1, x2, y2):
@@ -351,7 +409,13 @@ def analyse():
             float(np.median(all_valid[:, 2]))
         ])
         ref_H, ref_S, ref_V = ref_color
+        body_color = classify_body_color(ref_color)
+        color_profile = COLOR_PROFILES[body_color]
         fr_log.append(f"MOYENNE GLOBALE: H={ref_H:.0f} S={ref_S:.0f} V={ref_V:.0f}")
+        fr_log.append(
+            f"COULEUR={body_color} seuil suspect={color_profile['suspect']:.0f} "
+            f"repeinte={color_profile['repaint']:.0f}"
+        )
 
         final_img  = img_orig.copy()
         thick_box  = max(3, int(4 * min(scale_x, scale_y)))
@@ -362,7 +426,7 @@ def analyse():
 
         cv2.rectangle(final_img, (x1, y1), (x2, y2), (220, 220, 220), thick_line)
 
-        header = f"{car_info['make']} {car_info['model']} | {'AR' if facing=='rear' else ('AV' if facing=='front' else 'COTE')} | {angle}° | Ref H{int(ref_H)} S{int(ref_S)} V{int(ref_V)}"
+        header = f"{car_info['make']} {car_info['model']} | {body_color.upper()} | {'AR' if facing=='rear' else ('AV' if facing=='front' else 'COTE')} | {angle}° | Ref H{int(ref_H)} S{int(ref_S)} V{int(ref_V)}"
         (hw, hh), _ = cv2.getTextSize(header, cv2.FONT_HERSHEY_SIMPLEX, font_med * 1.2, font_thick)
         cv2.rectangle(final_img, (5, 5), (15 + hw, 20 + hh), (0, 0, 0), -1)
         cv2.putText(final_img, header, (10, 15 + hh),
@@ -383,18 +447,20 @@ def analyse():
             if zone_color is None:
                 color_rect, label_score, verdict = (150,150,150), "N/A", "Non analysable"
                 diff = 0.0
+                d_h = d_s = d_v = 0.0
+                reflection = False
             else:
-                # Raisonnement demande : distance Euclidienne entre la mediane
-                # HSV de la zone et la mediane HSV globale de la carrosserie.
-                diff = float(np.linalg.norm(zone_color - ref_color))
-                if 14.0 <= diff < 26.0:
+                diff, verdict, d_h, d_s, d_v, reflection = compare_zone_to_body(
+                    zone_color, ref_color, body_color
+                )
+                if verdict == "Peinture refaite!":
                     color_rect, verdict = (0, 0, 255), "Peinture refaite!"
                     detected += 1
-                elif diff < 14.0:
+                elif verdict == "Variation suspecte":
                     color_rect, verdict = (0, 165, 255), "Variation suspecte"
                 else:
                     color_rect, verdict = (0, 210, 0), "OK"
-                label_score = str(int(diff))
+                label_score = f"{int(diff)} dV{d_v:+.0f}"
 
             overlay = final_img.copy()
             cv2.fillPoly(overlay, [poly_global], color_rect)
@@ -427,6 +493,8 @@ def analyse():
 
             results_zones.append({
                 "idx": idx, "zone": zone["name"], "diff": round(diff, 1),
+                "diff_h": round(d_h, 1), "diff_s": round(d_s, 1),
+                "diff_v": round(d_v, 1), "reflection_or_shadow": reflection,
                 "pixels": px_count, "verdict": verdict,
                 "polygon": poly_global.tolist()
             })
@@ -458,6 +526,11 @@ def analyse():
             "image_size":      {"width": orig_w, "height": orig_h},
             "reference_hsv": {
                 "H": round(ref_H, 1), "S": round(ref_S, 1), "V": round(ref_V, 1)
+            },
+            "body_color": body_color,
+            "color_thresholds": {
+                "suspect": color_profile["suspect"],
+                "repaint": color_profile["repaint"]
             },
             "image_result":    analysed_name,
             "image_url":       request.host_url + "uploads/" + analysed_name
