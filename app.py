@@ -156,7 +156,7 @@ def compare_zone_to_body(zone_hsv, ref_hsv, color_name=None):
     # -------------------
     # SUSPECT
     # -------------------
-    elif ECART_SUSPECT_MIN <= diff < ECART_SUSPECT_MAX and DV_MIN < d_v < DV_MAX and DS_MIN<=d_s<DS_MAX and d_h<=DH_MAX :
+    elif ECART_SUSPECT_MIN <= diff < ECART_SUSPECT_MAX and DV_MIN < d_v < DV_MAX and d_h<=DH_MAX :
         verdict = "Variation suspecte"
 
     # -------------------
