@@ -116,15 +116,15 @@ def classify_body_color(ref_hsv):
 
 ECART_OK = 24.0           # > 10 = OK (vert)
 
-ECART_REPAINT_MIN = 12.2   # debut rouge
+ECART_REPAINT_MIN = 12   # debut rouge
 ECART_REPAINT_MAX = 24.0  # fin rouge
 
 ECART_SUSPECT_MIN = 0.0
-ECART_SUSPECT_MAX = 2.2
+ECART_SUSPECT_MAX = 11
 
 DV_MIN = -90
 DV_MAX = 11
-
+DH_MAX=5
 DS_MIN=0 
 DS_MAX=18
 def compare_zone_to_body(zone_hsv, ref_hsv, color_name=None):
@@ -150,13 +150,13 @@ def compare_zone_to_body(zone_hsv, ref_hsv, color_name=None):
     # -------------------
     # PEINTURE REFAITE
     # -------------------
-    elif ECART_REPAINT_MIN <= diff <= ECART_REPAINT_MAX and DV_MIN < d_v < DV_MAX and DS_MIN<=d_s<DS_MAX :
+    elif ECART_REPAINT_MIN <= diff <= ECART_REPAINT_MAX and DV_MIN < d_v < DV_MAX and DS_MIN<=d_s<DS_MAX and d_h<=DH_MAX :
         verdict = "Peinture refaite!"
 
     # -------------------
     # SUSPECT
     # -------------------
-    elif ECART_SUSPECT_MIN <= diff < ECART_SUSPECT_MAX and DV_MIN < d_v < DV_MAX  :
+    elif ECART_SUSPECT_MIN <= diff < ECART_SUSPECT_MAX and DV_MIN < d_v < DV_MAX and DS_MIN<=d_s<DS_MAX and d_h<=DH_MAX :
         verdict = "Variation suspecte"
 
     # -------------------
