@@ -114,7 +114,7 @@ def classify_body_color(ref_hsv):
 # SEUILS MODIFIABLES
 # =========================
 
-ECART_OK = 12.0           # > 10 = OK (vert)
+ECART_OK = 24.0           # > 10 = OK (vert)
 
 ECART_REPAINT_MIN = 12.2   # debut rouge
 ECART_REPAINT_MAX = 24.0  # fin rouge
