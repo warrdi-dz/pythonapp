@@ -123,7 +123,7 @@ ECART_SUSPECT_MIN = 0.0
 ECART_SUSPECT_MAX = 2.2
 
 DV_MIN = -90
-DV_MAX = 1
+DV_MAX = 11
 
 
 def compare_zone_to_body(zone_hsv, ref_hsv, color_name=None):
