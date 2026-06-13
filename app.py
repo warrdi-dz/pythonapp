@@ -119,7 +119,7 @@ ECART_OK = 24.0           # > 10 = OK (vert)
 ECART_REPAINT_MIN = 12   # debut rouge
 ECART_REPAINT_MAX = 24.0  # fin rouge
 
-ECART_SUSPECT_MIN = 0.0
+ECART_SUSPECT_MIN = 0
 ECART_SUSPECT_MAX = 11
 
 DV_MIN = -90
