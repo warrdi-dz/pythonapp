@@ -151,13 +151,13 @@ def compare_zone_to_body(zone_hsv, ref_hsv, color_name=None):
     # -------------------
     # PEINTURE REFAITE
     # -------------------
-    elif ECART_REPAINT_MIN <= diff <= ECART_REPAINT_MAX and DV_MIN < d_v < DV_MAX and DS_MIN<=d_s<DS_MAX and DH_MIN<d_h<=DH_MAX :
+    elif ECART_REPAINT_MIN <= diff <= ECART_REPAINT_MAX and (DV_MIN < d_v < DV_MAX or DS_MIN<=d_s<DS_MAX) and DH_MIN<d_h<=DH_MAX :
         verdict = "Peinture refaite!"
 
     # -------------------
     # SUSPECT
     # -------------------
-    elif ECART_SUSPECT_MIN <= diff < ECART_SUSPECT_MAX and DV_MIN < d_v < DV_MAX and DH_MIN<d_h<=DH_MAX :
+    elif ECART_SUSPECT_MIN <= diff < ECART_SUSPECT_MAX and DV_MIN < d_v < DV_MAX  :
         verdict = "Variation suspecte"
 
     # -------------------
