@@ -122,11 +122,11 @@ ECART_REPAINT_MAX = 24.0  # fin rouge
 ECART_SUSPECT_MIN = 0
 ECART_SUSPECT_MAX = 11
 
-DV_MIN = -90
+DV_MIN = 0
 DV_MAX = 15
 DH_MAX=5 
 DH_MIN=0
-DS_MIN=-10 
+DS_MIN=-15 
 DS_MAX=18
 def compare_zone_to_body(zone_hsv, ref_hsv, color_name=None):
 
