@@ -126,7 +126,7 @@ DV_MIN = -90
 DV_MAX = 15
 DH_MAX=5 
 DH_MIN=0
-DS_MIN=0 
+DS_MIN=-10 
 DS_MAX=18
 def compare_zone_to_body(zone_hsv, ref_hsv, color_name=None):
 
